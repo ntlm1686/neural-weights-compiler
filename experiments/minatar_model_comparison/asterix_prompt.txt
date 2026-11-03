@@ -1,0 +1,105 @@
+Design a policy from scratch, no training, no forward pass, no rollouts, no feedback, no code execution. Use only this prompt and, if instructed, the NeuralCompiler IR and backend. Output a complete Python function build_policy() that returns an ExecutableMLP of architecture 600 -> 32 -> 32 -> 6 with tanh activations. The network sees a 10x10x6 grid flattened in row-major order, logits actions 0=no-op, 1=left, 2=up, 3=right, 4=down, 5=fire. Actions are sampled by softmax; with probability 0.1 the previous action is repeated. Episodes end at terminal or 10000 steps. Source of the environment (NumPy as np) and six-channel observation wrapper follows. Make a single attempt without testing.
+
+class AsterixEnv:
+    def __init__(self, ramping=True):
+        self.channels = {'player': 0, 'enemy': 1, 'trail': 2, 'gold': 3}
+        self.action_map = ['n', 'l', 'u', 'r', 'd', 'f']
+        self.ramping = ramping
+        self.random = np.random.RandomState()
+        self.reset()
+
+    def act(self, a):
+        r = 0
+        if self.terminal:
+            return r, self.terminal
+        a = self.action_map[a]
+        if self.spawn_timer == 0:
+            self._spawn_entity()
+            self.spawn_timer = self.spawn_speed
+        if a == 'l':
+            self.player_x = max(0, self.player_x - 1)
+        elif a == 'r':
+            self.player_x = min(9, self.player_x + 1)
+        elif a == 'u':
+            self.player_y = max(1, self.player_y - 1)
+        elif a == 'd':
+            self.player_y = min(8, self.player_y + 1)
+
+        for i in range(len(self.entities)):
+            x = self.entities[i]
+            if x is not None and x[0:2] == [self.player_x, self.player_y]:
+                if x[3]:
+                    self.entities[i] = None
+                    r += 1
+                else:
+                    self.terminal = True
+        if self.move_timer == 0:
+            self.move_timer = self.move_speed
+            for i in range(len(self.entities)):
+                x = self.entities[i]
+                if x is not None:
+                    x[0] += 1 if x[2] else -1
+                    if x[0] < 0 or x[0] > 9:
+                        self.entities[i] = None
+                    if x[0:2] == [self.player_x, self.player_y]:
+                        if x[3]:
+                            self.entities[i] = None
+                            r += 1
+                        else:
+                            self.terminal = True
+        self.spawn_timer -= 1
+        self.move_timer -= 1
+        if self.ramping and (self.spawn_speed > 1 or self.move_speed > 1):
+            if self.ramp_timer >= 0:
+                self.ramp_timer -= 1
+            else:
+                if self.move_speed > 1 and self.ramp_index % 2:
+                    self.move_speed -= 1
+                if self.spawn_speed > 1:
+                    self.spawn_speed -= 1
+                self.ramp_index += 1
+                self.ramp_timer = 100
+        return r, self.terminal
+
+    def _spawn_entity(self):
+        lr = self.random.rand() < 0.5
+        is_gold = self.random.rand() < (1.0 / 3.0)
+        x = 0 if lr else 9
+        slot_options = [i for i in range(len(self.entities)) if self.entities[i] is None]
+        if not slot_options:
+            return
+        slot = slot_options[self.random.randint(len(slot_options))]
+        self.entities[slot] = [x, slot + 1, lr, is_gold]
+
+    def state(self):
+        state = np.zeros((10, 10, 4), dtype=bool)
+        state[self.player_y, self.player_x, 0] = 1
+        for x in self.entities:
+            if x is not None:
+                c = 3 if x[3] else 1
+                state[x[1], x[0], c] = 1
+                back_x = x[0] - 1 if x[2] else x[0] + 1
+                if 0 <= back_x <= 9:
+                    state[x[1], back_x, 2] = 1
+        return state
+
+    def reset(self):
+        self.player_x = 5
+        self.player_y = 5
+        self.entities = [None] * 8
+        self.shot_timer = 0
+        self.spawn_speed = 10
+        self.spawn_timer = self.spawn_speed
+        self.move_speed = 5
+        self.move_timer = self.move_speed
+        self.ramp_timer = 100
+        self.ramp_index = 0
+        self.terminal = False
+
+def asterix_obs(s):
+    obs = np.zeros((10, 10, 6), dtype=np.float32)
+    obs[:, :, 0] = s[:, :, 0]
+    obs[:, :, 1] = s[:, :, 1]
+    obs[:, :, 2] = s[:, :, 3]
+    obs[:, :, 4] = s[:, :, 2]
+    return obs.reshape(-1)

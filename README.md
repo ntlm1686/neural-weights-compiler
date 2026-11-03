@@ -13,15 +13,21 @@ This repository explores constructing neural-network weights from hand-written c
 
 These are measured results, not claims that all inputs or implementations are equivalent. Go checkpoint identities and equivalence of the local game environments to the original evaluation harness have not been independently verified. The adder experiment does not use a pretrained LLM. Details and complete settings are in [the revalidation record](results/revalidation_2026-11-03.md).
 
-### MinAtar: local results and published baselines
+### MinAtar: models alone vs. models + NeuralCompiler
 
-| Game | PPO 100M steps¹ | PPO 500M steps¹ | GPT-6 Astra one-shot¹ | This repository² |
-| --- | ---: | ---: | ---: | ---: |
-| Breakout | 15.8 | 25.3 | 517.4 | **546.81 ± 15.29** |
-| Seaquest | 5.6 | **88.9** | 53.1 | 59.80 ± 3.49 |
-| Asterix | 25.8 | 55.2 | 53.2 | **64.85 ± 2.17** |
+| Model and method | Breakout | Seaquest | Asterix |
+| --- | ---: | ---: | ---: |
+| GPT-6 Astra alone¹ | 517.4 | 53.1 | 53.2 |
+| GPT-6 Astra + NeuralCompiler² | 19.80 ± 1.24 | 2.74 ± 0.27 | 7.86 ± 0.54 |
+| GPT-6.1 Terra alone² | 5.88 ± 0.56 | 0.18 ± 0.03 | 5.03 ± 0.31 |
+| GPT-6.1 Terra + NeuralCompiler² | 47.98 ± 3.81 | 0.65 ± 0.06 | 0.43 ± 0.06 |
+| Gemini 4 Argon alone³ | 71.07 ± 5.55 | — | — |
+| Gemini 4 Argon + NeuralCompiler³ | 546.81 ± 15.29 | — | — |
+| Gemini 4 Argon, developed manual policies³ | — | 59.80 ± 3.49 | 64.85 ± 2.17 |
 
-¹ Results reported in the [original article](https://rikiyat.github.io/blog/weight-space-programming/), which used 1,000 evaluation episodes. ² Our 200-episode results use the local implementation and one seed. These numbers are useful context, but do not establish a controlled head-to-head comparison: environment equivalence and the local policy's development history remain unverified.
+¹ Published [Astra results](https://rikiyat.github.io/blog/weight-space-programming/), evaluated on 1,000 episodes; its generated policy files are not evaluated locally here. ² New, independent, zero-conversation-history subagents generated policies without training, model forward passes or rollout feedback; their outputs were subsequently scored locally on 200 episodes, seed 0. For Seaquest and Asterix, direct weight authorship was expressed as Python initialization code; the published Astra protocol required an edits block and prohibited tools. ³ Earlier work attributed to Gemini 4 Argon by the project owner: the available standalone Breakout edits and existing compiler policies were scored locally on 200 episodes. Their original generation and selection histories are not fully recorded.
+
+The new local runs share the same environment, sticky-action probability 0.1 and 10,000-step episode cap; ± is the episode standard error. A dash means no result was produced, not a zero score. The earlier Gemini policies reflect a development process whose selection history is not recorded; its Seaquest and Asterix implementations write raw weights directly and therefore are not counted as NeuralCompiler results. The published Astra run also used a different harness and episode count. See [the experiment record](experiments/minatar_model_comparison/README.md) for prompts, policy artifacts and commands.
 
 **Scope:** This is a research prototype, not a general natural-language-to-weights compiler. The repository does not include an automated LLM frontend. The Transformer backend operates on explicitly populated residual-stream registers, with attention, ReLU MLPs and residual connections, but no LayerNorm, token embedding or language-model output head. Its circuits require suitable register capacity, layers, heads, numerical ranges and input encodings. The experiments do not demonstrate grafting into a pretrained language model or solve the Gemma experiment from the original post.
 
@@ -29,7 +35,7 @@ Weight construction does not use gradient descent. Evaluation does use forward p
 
 ## Blind weight-reading comparison
 
-The table places the published GPT-6 Astra results, the repository's earlier reports, and new GPT-6.1 Terra results side by side. The user described the earlier work as Argon-produced; the historical files do not record the underlying blind subagent's model identity, so that attribution cannot be independently verified from the repository. The published Astra results come from the [original article](https://rikiyat.github.io/blog/weight-space-programming/), not a new local run.
+The table places the published GPT-6 Astra results, the repository's earlier Gemini 4 Argon reports, and new GPT-6.1 Terra results side by side. The project owner identified the earlier work as Argon-produced; the historical files do not independently record the blind subagent's model identity. The published Astra results come from the [original article](https://rikiyat.github.io/blog/weight-space-programming/), not a new local run.
 
 | Task | Published GPT-6 Astra | Earlier repository report (Argon-era) | GPT-6.1 Terra, fresh subagent |
 | --- | --- | --- | --- |
