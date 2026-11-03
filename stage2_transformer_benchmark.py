@@ -8,7 +8,7 @@ Benchmarks all 7 tasks from the NeuralCompiler roadmap plus 1 compositional task
   4. Prefix Sum         : Cumulative sum s_i = sum_{j<=i} x_j        [Medium]
   5. Sorting            : Sort sequence of N numbers                 [Medium]
   6. Graph Reachability : Multi-hop directed graph reachability      [Hard]
-  7. Shortest Path      : Weighted graph shortest path (Bellman-Ford)[Hard]
+  7. Shortest Path      : Bounded weighted graph shortest path       [Hard]
   8. Compositional (Program Generalization):
        "Count how many elements are strictly greater than the prefix mean"
        (Composes Prefix Mean + Comparison + Counting with zero retraining)
@@ -17,8 +17,11 @@ Also tests Architecture Transfer across:
   - Config A: Transformer(d_model=64,  n_layers=6, n_heads=4)
   - Config B: Transformer(d_model=128, n_layers=8, n_heads=8)
   - Config C: Transformer(d_model=256, n_layers=8, n_heads=8)
+The shortest-path circuit uses 20 layers at each width, not the depths above.
 """
 
+import argparse
+import json
 import time
 from typing import Dict, List, Tuple
 import numpy as np
@@ -162,7 +165,8 @@ def build_sorting_ir(n: int = 8) -> TransformerProgram:
         op_type="COUNT_GREATER_THAN_VECTOR",
         in_regs=["x", "all_x"],
         out_reg="rank",
-        params={"slope": 200.0, "margin": 0.0},
+        params={"slope": 200.0, "margin": 0.0,
+                "tie_break_reg": "pos_oh", "tie_break_scale": 1.0 / (2 * n)},
     )
     prog.add_mlp_op(
         layer=2,
@@ -226,9 +230,9 @@ def build_graph_reachability_ir(n_nodes: int = 6, max_hops: int = 4) -> Transfor
 # ==============================================================================
 # 7. Shortest Path: Tropical (min, +) Bellman-Ford in Transformer Layers
 # ==============================================================================
-def build_shortest_path_ir(n_nodes: int = 5, max_hops: int = 6) -> TransformerProgram:
+def build_shortest_path_ir(n_nodes: int = 5, max_hops: int = None) -> TransformerProgram:
     """
-    Exact Floyd-Warshall / Bellman-Ford pivot relaxation in Transformer layers!
+    Sequential pivot relaxations for nonnegative, bounded edge weights.
     In each layer l = 0 .. n_nodes-1 (with pivot node k = l % n_nodes):
       1. Attention Head (l, H0) (`BROADCAST_K_DISTANCE`):
          Queries with constant 1 against `node_oh[:, k]`, broadcasting pivot node k's
@@ -237,9 +241,11 @@ def build_shortest_path_ir(n_nodes: int = 5, max_hops: int = 6) -> TransformerPr
          Updates `dist[i]` in-place using the exact ReLU identity:
            `dist[i] <- dist[i] - ReLU(dist[i] - (pivot_dist_{l} + edge_w[i, k]))`
                      = `min(dist[i], dist[k] + edge_w[i, k])`!
-    Requires only 1 Attention Head and 1 ReLU MLP unit per layer, with ZERO tie-breaking
-    issues!
+    Repeating all pivots n_nodes-1 times covers all simple shortest paths.
+    Softmax and bounded sentinel values impose numerical/domain limitations.
     """
+    if max_hops is None:
+        max_hops = n_nodes * (n_nodes - 1)
     prog = TransformerProgram(
         name=f"Shortest_Path_N{n_nodes}_Steps{max_hops}",
         output_register="dist_0",
@@ -409,7 +415,7 @@ def evaluate_all_tasks(d_model: int = 64, n_layers: int = 6, n_heads: int = 4, n
     model5 = TransformerCircuitBackend.compile(prog5, d_model=d_model, n_layers=n_layers, n_heads=n_heads)
     correct5 = 0
     for _ in range(n_trials):
-        x = rng.choice(np.arange(-30, 31), size=8, replace=False).astype(np.float64)
+        x = rng.randint(-30, 31, size=8).astype(np.float64)
         pred_sorted = np.round(model5.run({"x": x, "pos_oh": pos_oh8}, seq_len=8))
         gt_sorted = np.sort(x)
         if np.array_equal(pred_sorted, gt_sorted):
@@ -451,10 +457,11 @@ def evaluate_all_tasks(d_model: int = 64, n_layers: int = 6, n_heads: int = 4, n
         "total_params": model6.total_params,
     }
 
-    # 7. Shortest Path (Weighted Directed Graph, N=5 nodes, 6 pivot steps across layers 0..5)
+    # 7. Shortest Path: 4 full pivot sweeps, checked against synchronous Bellman-Ford.
     n_sp = 5
-    prog7 = build_shortest_path_ir(n_nodes=n_sp, max_hops=6)
-    model7 = TransformerCircuitBackend.compile(prog7, d_model=d_model, n_layers=n_layers, n_heads=n_heads)
+    sp_layers = n_sp * (n_sp - 1)
+    prog7 = build_shortest_path_ir(n_nodes=n_sp)
+    model7 = TransformerCircuitBackend.compile(prog7, d_model=d_model, n_layers=max(n_layers, sp_layers), n_heads=n_heads)
     node_oh5 = np.eye(n_sp, dtype=np.float64)
     correct7 = 0
     INF = 100.0
@@ -466,7 +473,7 @@ def evaluate_all_tasks(d_model: int = 64, n_layers: int = 6, n_heads: int = 4, n
                     edge_w[v, u] = 0.0
                 elif rng.rand() < 0.45:
                     edge_w[v, u] = float(rng.randint(1, 10))
-        # Source is node 0; pivot order k = 0, 1, 2, 3, 4, 0 relaxes all paths in topological/pivot order
+        # Source is node 0; use a separate synchronous Bellman-Ford reference.
         dist_0 = np.full(n_sp, INF, dtype=np.float64)
         dist_0[0] = 0.0
 
@@ -474,12 +481,11 @@ def evaluate_all_tasks(d_model: int = 64, n_layers: int = 6, n_heads: int = 4, n
             model7.run({"node_oh": node_oh5, "edge_w": edge_w, "dist_0": dist_0}, seq_len=n_sp)
         )
         gt_dist = dist_0.copy()
-        for step in range(6):
-            k = step % n_sp
-            gt_dist = np.minimum(gt_dist, gt_dist[k] + edge_w[:, k])
+        for _ in range(n_sp - 1):
+            gt_dist = np.minimum(gt_dist, np.min(edge_w + gt_dist[None, :], axis=1))
         if np.array_equal(pred_dist, np.round(gt_dist)):
             correct7 += 1
-    results["7. Shortest Path (Bellman-Ford)"] = {
+    results["7. Shortest Path (20 layers)"] = {
         "accuracy": correct7 / n_trials,
         "nonzero_params": model7.nonzero_params,
         "total_params": model7.total_params,
@@ -510,6 +516,9 @@ def evaluate_all_tasks(d_model: int = 64, n_layers: int = 6, n_heads: int = 4, n
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run the bounded-domain transformer circuit benchmark")
+    parser.add_argument("--output-json", help="write benchmark data for plotting")
+    args = parser.parse_args()
     configs = [
         ("Small  (d=64,  L=6, H=4)", 64, 6, 4),
         ("Medium (d=128, L=8, H=8)", 128, 8, 8),
@@ -522,9 +531,14 @@ if __name__ == "__main__":
         dt = time.time() - t0
         all_arch_results[label] = res
         print(f"\n=== Architecture: {label} (Eval time: {dt:.2f}s) ===")
+        print("Shortest path uses 20 layers; all other tasks use the depth above.")
         print(f"{'Task':<38} | {'Accuracy':<10} | {'Nonzero / Total Weights'}")
         print("-" * 78)
         for task_name, info in res.items():
             acc_str = f"{info['accuracy']*100:6.2f}%"
             wt_str = f"{info['nonzero_params']:>4} / {info['total_params']:<9} ({info['nonzero_params']/info['total_params']*100:.4f}%)"
             print(f"{task_name:<38} | {acc_str:<10} | {wt_str}")
+    if args.output_json:
+        with open(args.output_json, "w", encoding="utf-8") as f:
+            json.dump({"trials_per_task": 500, "seed": 42, "architectures": all_arch_results}, f, indent=2)
+            f.write("\n")

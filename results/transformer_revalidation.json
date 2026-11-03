@@ -1,0 +1,132 @@
+{
+  "trials_per_task": 500,
+  "seed": 42,
+  "architectures": {
+    "Small  (d=64,  L=6, H=4)": {
+      "1. Comparison (x > y)": {
+        "accuracy": 1.0,
+        "nonzero_params": 7,
+        "total_params": 298368
+      },
+      "2. Maximum & Argmax": {
+        "accuracy": 1.0,
+        "nonzero_params": 6,
+        "total_params": 298368
+      },
+      "3. Counting Matches": {
+        "accuracy": 1.0,
+        "nonzero_params": 13,
+        "total_params": 298368
+      },
+      "4. Prefix Sum": {
+        "accuracy": 1.0,
+        "nonzero_params": 66,
+        "total_params": 298368
+      },
+      "5. Sorting (N=8)": {
+        "accuracy": 1.0,
+        "nonzero_params": 337,
+        "total_params": 298368
+      },
+      "6. Graph Reachability": {
+        "accuracy": 1.0,
+        "nonzero_params": 80,
+        "total_params": 298368
+      },
+      "7. Shortest Path (20 layers)": {
+        "accuracy": 1.0,
+        "nonzero_params": 160,
+        "total_params": 994560
+      },
+      "8. Compositional (Above Prefix Mean)": {
+        "accuracy": 1.0,
+        "nonzero_params": 11,
+        "total_params": 298368
+      }
+    },
+    "Medium (d=128, L=8, H=8)": {
+      "1. Comparison (x > y)": {
+        "accuracy": 1.0,
+        "nonzero_params": 7,
+        "total_params": 1582080
+      },
+      "2. Maximum & Argmax": {
+        "accuracy": 1.0,
+        "nonzero_params": 6,
+        "total_params": 1582080
+      },
+      "3. Counting Matches": {
+        "accuracy": 1.0,
+        "nonzero_params": 13,
+        "total_params": 1582080
+      },
+      "4. Prefix Sum": {
+        "accuracy": 1.0,
+        "nonzero_params": 66,
+        "total_params": 1582080
+      },
+      "5. Sorting (N=8)": {
+        "accuracy": 1.0,
+        "nonzero_params": 337,
+        "total_params": 1582080
+      },
+      "6. Graph Reachability": {
+        "accuracy": 1.0,
+        "nonzero_params": 80,
+        "total_params": 1582080
+      },
+      "7. Shortest Path (20 layers)": {
+        "accuracy": 1.0,
+        "nonzero_params": 160,
+        "total_params": 3955200
+      },
+      "8. Compositional (Above Prefix Mean)": {
+        "accuracy": 1.0,
+        "nonzero_params": 11,
+        "total_params": 1582080
+      }
+    },
+    "Large  (d=256, L=8, H=8)": {
+      "1. Comparison (x > y)": {
+        "accuracy": 1.0,
+        "nonzero_params": 7,
+        "total_params": 6309888
+      },
+      "2. Maximum & Argmax": {
+        "accuracy": 1.0,
+        "nonzero_params": 6,
+        "total_params": 6309888
+      },
+      "3. Counting Matches": {
+        "accuracy": 1.0,
+        "nonzero_params": 13,
+        "total_params": 6309888
+      },
+      "4. Prefix Sum": {
+        "accuracy": 1.0,
+        "nonzero_params": 66,
+        "total_params": 6309888
+      },
+      "5. Sorting (N=8)": {
+        "accuracy": 1.0,
+        "nonzero_params": 337,
+        "total_params": 6309888
+      },
+      "6. Graph Reachability": {
+        "accuracy": 1.0,
+        "nonzero_params": 80,
+        "total_params": 6309888
+      },
+      "7. Shortest Path (20 layers)": {
+        "accuracy": 1.0,
+        "nonzero_params": 160,
+        "total_params": 15774720
+      },
+      "8. Compositional (Above Prefix Mean)": {
+        "accuracy": 1.0,
+        "nonzero_params": 11,
+        "total_params": 6309888
+      }
+    }
+  }
+}

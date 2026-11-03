@@ -10,6 +10,7 @@ against:
 """
 
 import os
+import argparse
 from typing import Dict, List, Tuple
 import numpy as np
 
@@ -570,6 +571,13 @@ def play_h2h(net_a: Dict[str, np.ndarray], net_b: Dict[str, np.ndarray], n_games
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Compile a Go policy and optionally evaluate external checkpoints")
+    parser.add_argument("--checkpoints", default=None, help="directory containing budget_0 and ppo_s0/1/2")
+    parser.add_argument("--games", type=int, default=200, help="even number of games per opponent")
+    parser.add_argument("--seed", type=int, default=31337)
+    args = parser.parse_args()
+    if args.games < 2 or args.games % 2:
+        parser.error("--games must be a positive even number")
     compiled_net = SpatialGraphGoCompiler.compile()
     total_params = sum(v.size for v in compiled_net.values())
     nonzero_params = sum(np.count_nonzero(v) for v in compiled_net.values())
@@ -578,21 +586,15 @@ if __name__ == "__main__":
     print(f"Total Weights  : {total_params:,}")
     print(f"Nonzero Weights: {nonzero_params:,} ({nonzero_params / total_params * 100:.2f}%)")
 
-    if os.path.exists("/tmp/go_checkpoints/budget_0/L1.W.npy"):
-        astra_b0 = load_go_checkpoint("/tmp/go_checkpoints/budget_0")
-        ppo_s0 = load_go_checkpoint("/tmp/go_checkpoints/ppo_s0")
-
-        res_vs_b0 = play_h2h(compiled_net, astra_b0, n_games=200, seed=31337)
-        print(
-            f"Head-to-Head vs GPT-6 Astra (budget_0, 1.48M) : "
-            f"{res_vs_b0['win_rate']*100:5.1f}% Win Rate "
-            f"(Black: {res_vs_b0['win_as_black']*100:5.1f}%, White: {res_vs_b0['win_as_white']*100:5.1f}%)"
-        )
-
-        res_vs_ppo = play_h2h(compiled_net, ppo_s0, n_games=200, seed=31337)
-        print(
-            f"Head-to-Head vs 20.5M-Game PPO (same-size s0) : "
-            f"{res_vs_ppo['win_rate']*100:5.1f}% Win Rate "
-            f"(Black: {res_vs_ppo['win_as_black']*100:5.1f}%, White: {res_vs_ppo['win_as_white']*100:5.1f}%) "
-            f"[Astra budget_0 had 42.6%]"
-        )
+    if args.checkpoints is None:
+        print("No checkpoint directory supplied; head-to-head evaluation skipped.")
+    else:
+        for name in ("budget_0", "ppo_s0", "ppo_s1", "ppo_s2"):
+            folder = os.path.join(args.checkpoints, name)
+            if not os.path.isfile(os.path.join(folder, "L1.W.npy")):
+                print(f"{name}: checkpoint missing at {folder}; skipped")
+                continue
+            result = play_h2h(compiled_net, load_go_checkpoint(folder), n_games=args.games, seed=args.seed)
+            print(f"{name}: {result['win_rate'] * 100:.1f}% "
+                  f"(black {result['win_as_black'] * 100:.1f}%, "
+                  f"white {result['win_as_white'] * 100:.1f}%; {args.games} games)", flush=True)

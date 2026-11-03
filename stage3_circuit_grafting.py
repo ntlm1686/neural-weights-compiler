@@ -1,21 +1,15 @@
 """
 Stage 3 Demo: Orthogonal Subspace Circuit Grafting into Pre-Existing Transformers
 =================================================================================
-Addresses the fundamental limitation reported in Experiment 8 of 'Sparks of Weight-Space
-Programming' (where direct weight editing failed to improve Gemma 3 270M on math: 6.8% -> 7.0%):
-  "Editing weights could remove an obstacle that hid an ability, but it could not add an
-   ability the model lacked."
-
-Why did single-neuron / rank-1 manual weight tweaks fail to add new algorithmic reasoning?
-Because multi-step algorithms (such as multi-digit base-10 carry-lookahead addition) require
-a coordinated multi-layer circuit across Attention (W_Q, W_K, W_V, W_O) and MLPs (W_fc, W_proj).
+This is a controlled synthetic demonstration; it does not modify or evaluate a pretrained
+language model and does not establish why edits to other models did or did not work.
 
 Here we demonstrate **Orthogonal Subspace Circuit Grafting**:
 1. We take a pre-existing 1.58M-parameter Transformer (`d_model=128, n_layers=8, n_heads=8`)
    that already performs a composite "host" task (`Task_Host`: Causal Prefix Sum + Global Max +
    Token Match Counting) using its active latent subspace `S_host`.
-2. On a complex new algorithmic capability (`Task_New`: 8-Digit Base-10 Addition with Arbitrary-Length
-   Cascading Carry-Lookahead, e.g., `99999999 + 00000001 = (1)00000000`), the unedited host model
+2. On a new capability (`Task_New`: 8-Digit Base-10 Addition with cascading carry,
+   e.g., `99999999 + 00000001 = (1)00000000`), the unedited host model
    has **0.00% accuracy**.
 3. Our `NeuralCompiler` compiles a 2-Layer **O(1)-Depth Carry-Lookahead Adder Circuit** into a
    sparse weight patch $\Delta W$ allocated strictly inside the host model's orthogonal nullspace
@@ -24,8 +18,7 @@ Here we demonstrate **Orthogonal Subspace Circuit Grafting**:
 4. After grafting $W_{\text{grafted}} = W_{\text{host}} + \Delta W$ with **zero gradient training**:
    - **New Capability (`8-Digit Carry-Lookahead Addition`)**: rises from **0.00% -> 100.00%**
      (500/500 random 8-digit additions + 100/100 adversarial cascading-carry additions)!
-   - **Host Capability Preservation (Zero Catastrophic Forgetting)**: **100.00% exact bit-for-bit
-     preservation** (`max |f_grafted(x) - f_host(x)| = 0.000000e+00` across 500 host test sequences)!
+   - Host outputs had zero measured numerical difference across 500 test sequences.
 """
 
 from typing import Dict, Tuple
@@ -289,6 +282,7 @@ def evaluate_grafting_experiment(n_trials: int = 500):
 
     # 1. Verify Host Task Preservation (Zero Catastrophic Forgetting) + Simultaneous Execution
     host_exact_matches = 0
+    host_base_matches = 0
     max_host_diff = 0.0
     base_add_correct = 0
     grafted_add_correct = 0
@@ -325,6 +319,12 @@ def evaluate_grafting_experiment(n_trials: int = 500):
         gt_ps = np.cumsum(hx)
         gt_cnt = float(np.sum(hx == hq[0]))
         gt_max = float(np.max(hx))
+        if (
+            np.array_equal(np.round(host_out_orig[:, 0]), gt_ps)
+            and int(np.round(host_out_orig[0, 1])) == int(gt_cnt)
+            and float(np.round(host_out_orig[0, 2])) == gt_max
+        ):
+            host_base_matches += 1
         if (
             np.array_equal(np.round(host_out_graft[:, 0]), gt_ps)
             and int(np.round(host_out_graft[0, 1])) == int(gt_cnt)
@@ -400,9 +400,9 @@ def evaluate_grafting_experiment(n_trials: int = 500):
     print(f"Host Model Nonzero Weights      : {host_model.nonzero_params}")
     print(f"Grafted Adder Patch (Delta W)   : +{delta_params} nonzero weights ({delta_params / host_model.total_params * 100:.4f}% of model)")
     print("-" * 82)
-    print(f"Host Task Accuracy (Before)     : 100.00% (500/500)")
+    print(f"Host Task Accuracy (Before)     : {host_base_matches / n_trials * 100:6.2f}% ({host_base_matches}/{n_trials})")
     print(f"Host Task Accuracy (After Graft): {host_exact_matches / n_trials * 100:6.2f}% ({host_exact_matches}/{n_trials})")
-    print(f"Max Host Output Drift |df_host| : {max_host_diff:.6e} (Bit-for-bit zero forgetting!)")
+    print(f"Max Host Output Drift |df_host| : {max_host_diff:.6e} (over {n_trials} sampled inputs)")
     print("-" * 82)
     print(f"8-Digit Addition (Before Graft) : {base_add_correct / n_trials * 100:6.2f}% ({base_add_correct}/{n_trials})")
     print(f"8-Digit Addition (After Graft)  : {grafted_add_correct / n_trials * 100:6.2f}% ({grafted_add_correct}/{n_trials})")

@@ -13,7 +13,7 @@ from .ir import TransformerProgram
 
 class ExecutableTransformer:
     """
-    Standard Pre-Norm / Residual Transformer with compiled weight matrices.
+    Residual attention/MLP model with compiled weights and no layer normalization.
     Every layer l = 0 .. L-1 executes:
       1) Multi-Head Self-Attention:
            Q_h = X @ W_Q[l, h] + b_Q[l, h]
@@ -525,6 +525,11 @@ class TransformerCircuitBackend:
                 raise ValueError(f"MLP capacity exceeded at layer {l}")
             slope = float(params.get("slope", 200.0))
             margin = float(params.get("margin", 0.0))
+            tie_reg = params.get("tie_break_reg")
+            tie_sl = reg_slices[tie_reg] if tie_reg else None
+            tie_scale = float(params.get("tie_break_scale", 0.0))
+            if tie_sl and tie_sl.stop - tie_sl.start != K:
+                raise ValueError("tie-break register must have the same width as the vector")
 
             for k in range(K):
                 u0 = cursor + 2 * k
@@ -532,11 +537,17 @@ class TransformerCircuitBackend:
                 W_fc[x_sl.start, u0] = slope
                 W_fc[vec_sl.start + k, u0] = -slope
                 b_fc[u0] = -slope * margin
+                if tie_sl:
+                    for i in range(K):
+                        W_fc[tie_sl.start + i, u0] = slope * tie_scale * (i - k)
                 W_proj[u0, out_sl.start] += 1.0
 
                 W_fc[x_sl.start, u1] = slope
                 W_fc[vec_sl.start + k, u1] = -slope
                 b_fc[u1] = -slope * margin - 1.0
+                if tie_sl:
+                    for i in range(K):
+                        W_fc[tie_sl.start + i, u1] = slope * tie_scale * (i - k)
                 W_proj[u1, out_sl.start] -= 1.0
             return cursor + 2 * K
 
