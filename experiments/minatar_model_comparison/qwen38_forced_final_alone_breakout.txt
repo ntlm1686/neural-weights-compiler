@@ -1,0 +1,61 @@
+```edits
+# Handcrafted policy:
+# - Unit 0 of layer 1 computes a small linear feature proportional to
+#   (ball_x - paddle_x), using the ball channel and paddle channel.
+# - Unit 0 of layer 2 amplifies that signed difference through tanh.
+# - Output layer maps positive difference to "right", negative to "left",
+#   and zero to "no-op".  The other actions are kept very low.
+# This makes the paddle chase the ball's current column, which is a robust
+# survival policy for diagonal Breakout.
+
+# W1: 600 x 32.  Only unit 0 is used.
+# Ball channel is channel 3.  For every row r and column c, input index is
+# (r*10 + c)*6 + 3.  Give weight +0.1*c.
+W1[3:600:6, 0] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+W1[63:660:6, 0] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+W1[123:720:6, 0] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+W1[183:780:6, 0] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+W1[243:840:6, 0] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+W1[303:900:6, 0] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+W1[363:960:6, 0] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+W1[423:1020:6, 0] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+W1[483:1080:6, 0] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+W1[543:1140:6, 0] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
+# Paddle channel is channel 0.  The paddle is only on row 9, but setting all
+# rows is harmless because only one paddle cell is active.  Give weight -0.1*c.
+W1[0:600:6, 0] = [0.0, -0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9]
+W1[60:660:6, 0] = [0.0, -0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9]
+W1[120:720:6, 0] = [0.0, -0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9]
+W1[180:780:6, 0] = [0.0, -0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9]
+W1[240:840:6, 0] = [0.0, -0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9]
+W1[300:900:6, 0] = [0.0, -0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9]
+W1[360:960:6, 0] = [0.0, -0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9]
+W1[420:1020:6, 0] = [0.0, -0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9]
+W1[480:1080:6, 0] = [0.0, -0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9]
+W1[540:1140:6, 0] = [0.0, -0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9]
+
+# b1: no bias needed for the signed difference.
+b1[:] = 0
+
+# W2: amplify the signed difference.  Only h2 unit 0 is used.
+W2[0, 0] = 12.0
+b2[:] = 0
+
+# W3: map h2[0] to action logits.
+# action 0 = no-op, 1 = left, 2 = up, 3 = right, 4 = down, 5 = fire
+W3[0, 0] = 0.0
+W3[0, 1] = -8.0
+W3[0, 2] = -12.0
+W3[0, 3] = 8.0
+W3[0, 4] = -12.0
+W3[0, 5] = -12.0
+
+# b3: no-op is preferred when the ball and paddle are in the same column.
+b3[0] = 0.0
+b3[1] = -2.0
+b3[2] = -12.0
+b3[3] = -2.0
+b3[4] = -12.0
+b3[5] = -12.0
+```

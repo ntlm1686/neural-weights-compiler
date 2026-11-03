@@ -1,0 +1,273 @@
+I’ll use a small hand-designed circuit:
+
+- Layer 1 extracts:
+  - paddle position `p`
+  - ball position `(bx, by)`
+  - trail position `(tx, ty)`
+  - horizontal direction from `bx - tx`
+  - vertical direction from `by - ty`, with a fallback for the rare horizontal “bounce” state
+  - a few coarse “ball is near left/right edge” features
+- Layer 2 forms a predicted paddle target:
+  - if the ball is moving down, predict its x when it reaches row 9
+  - if the ball is moving up, predict its x after it bounces off the top and comes back down
+  - use wall-reflection features to avoid sending the paddle past the edges
+- Output logits:
+  - `left` is high when the target is left of the paddle
+  - `right` is high when the target is right of the paddle
+  - `no-op` is high when the paddle is already close to the target
+  - `up/down/fire` are suppressed
+
+```python
+def build_policy():
+    from ir import MLPProgram
+    from backend import MLPCompilerBackend
+
+    prog = MLPProgram(
+        input_dim=600,
+        h1_dim=32,
+        h2_dim=32,
+        output_dim=6,
+        activation="tanh",
+    )
+
+    def idx(r, c, ch):
+        return (r * 10 + c) * 6 + ch
+
+    def col_weights(vals):
+        return [float(v) for v in vals]
+
+    # p = paddle x
+    prog.add_h1_threshold(
+        name="p",
+        input_weights=prog.add_spatial_coord_extractor(
+            name="p",
+            grid_shape=(10, 10, 6),
+            channel=0,
+            col_weights=col_weights(range(10)),
+            row_filter=[9],
+        ),
+        threshold=0.0,
+        gain=0.12,
+    )
+
+    # bx = ball x
+    prog.add_h1_threshold(
+        name="bx",
+        input_weights=prog.add_spatial_coord_extractor(
+            name="bx",
+            grid_shape=(10, 10, 6),
+            channel=3,
+            col_weights=col_weights(range(10)),
+        ),
+        threshold=0.0,
+        gain=0.12,
+    )
+
+    # by = ball y
+    prog.add_h1_threshold(
+        name="by",
+        input_weights=prog.add_spatial_coord_extractor(
+            name="by",
+            grid_shape=(10, 10, 6),
+            channel=3,
+            col_weights=col_weights([1] * 10),
+        ),
+        threshold=0.0,
+        gain=0.12,
+    )
+
+    # tx = trail x
+    prog.add_h1_threshold(
+        name="tx",
+        input_weights=prog.add_spatial_coord_extractor(
+            name="tx",
+            grid_shape=(10, 10, 6),
+            channel=4,
+            col_weights=col_weights(range(10)),
+        ),
+        threshold=0.0,
+        gain=0.12,
+    )
+
+    # ty = trail y
+    prog.add_h1_threshold(
+        name="ty",
+        input_weights=prog.add_spatial_coord_extractor(
+            name="ty",
+            grid_shape=(10, 10, 6),
+            channel=4,
+            col_weights=col_weights([1] * 10),
+        ),
+        threshold=0.0,
+        gain=0.12,
+    )
+
+    # dx = bx - tx, sign of horizontal motion
+    dx_w = {}
+    for r in range(10):
+        for c in range(10):
+            dx_w[idx(r, c, 3)] = float(c)
+            dx_w[idx(r, c, 4)] = -float(c)
+    prog.add_h1_threshold(
+        name="dx",
+        input_weights=dx_w,
+        threshold=0.0,
+        gain=0.35,
+    )
+
+    # dy = by - ty, sign of vertical motion
+    dy_w = {}
+    for r in range(10):
+        for c in range(10):
+            dy_w[idx(r, c, 3)] = float(r)
+            dy_w[idx(r, c, 4)] = -float(r)
+    prog.add_h1_threshold(
+        name="dy",
+        input_weights=dy_w,
+        threshold=0.0,
+        gain=0.35,
+    )
+
+    # down = dy > 0
+    prog.add_h2_gate(
+        name="down",
+        h1_terms={"dy": 6.0},
+        bias=-0.35,
+    )
+
+    # up = dy < 0
+    prog.add_h2_gate(
+        name="up",
+        h1_terms={"dy": -6.0},
+        bias=0.35,
+    )
+
+    # horizontal bounce fallback: if dy is near zero, use ball height to guess vertical phase.
+    # Low ball height after a brick hit is usually “about to go up”; high height after paddle is “going up”.
+    prog.add_h2_gate(
+        name="dy_fallback",
+        h1_terms={"by": -1.2, "dy": 0.2},
+        bias=0.55,
+    )
+
+    # effective vertical direction: +1 down, -1 up, with fallback
+    prog.add_h2_gate(
+        name="vdir",
+        h1_terms={"dy": 4.0, "by": -0.8},
+        bias=0.25,
+    )
+
+    # right = dx > 0
+    prog.add_h2_gate(
+        name="right",
+        h1_terms={"dx": 6.0},
+        bias=-0.35,
+    )
+
+    # left = dx < 0
+    prog.add_h2_gate(
+        name="left",
+        h1_terms={"dx": -6.0},
+        bias=0.35,
+    )
+
+    # ball near left edge
+    prog.add_h2_gate(
+        name="near_left",
+        h1_terms={"bx": -2.5},
+        bias=1.2,
+    )
+
+    # ball near right edge
+    prog.add_h2_gate(
+        name="near_right",
+        h1_terms={"bx": 2.5},
+        bias=-1.2,
+    )
+
+    # time-to-bottom if moving down: 9 - by
+    prog.add_h2_gate(
+        name="t_down",
+        h1_terms={"by": -1.0},
+        bias=9.0,
+    )
+
+    # time-to-bottom if moving up: by + 9
+    prog.add_h2_gate(
+        name="t_up",
+        h1_terms={"by": 1.0},
+        bias=9.0,
+    )
+
+    # predicted horizontal displacement if moving right
+    prog.add_h2_gate(
+        name="disp_right",
+        h1_terms={"t_down": 1.0, "t_up": 1.0, "down": 0.0, "up": 0.0},
+        bias=0.0,
+    )
+
+    # predicted horizontal displacement if moving left
+    prog.add_h2_gate(
+        name="disp_left",
+        h1_terms={"t_down": -1.0, "t_up": -1.0, "down": 0.0, "up": 0.0},
+        bias=0.0,
+    )
+
+    # raw target before wall correction
+    prog.add_h2_gate(
+        name="target_raw",
+        h1_terms={"bx": 1.0, "disp_right": 1.0, "disp_left": 1.0},
+        bias=0.0,
+    )
+
+    # wall correction: if raw target is too far right, pull it back; if too far left, pull it forward.
+    prog.add_h2_gate(
+        name="over_right",
+        h1_terms={"target_raw": 1.0},
+        bias=-10.5,
+    )
+    prog.add_h2_gate(
+        name="over_left",
+        h1_terms={"target_raw": -1.0},
+        bias=0.5,
+    )
+
+    prog.add_h2_gate(
+        name="target",
+        h1_terms={"target_raw": 1.0, "over_right": -1.0, "over_left": 1.0},
+        bias=0.0,
+    )
+
+    # distance = target - p
+    prog.add_h2_gate(
+        name="dist",
+        h1_terms={"target": 1.0, "p": -1.0},
+        bias=0.0,
+    )
+
+    # left action: dist < -0.5
+    prog.set_output_action(
+        action_idx=1,
+        h2_terms={"dist": -8.0},
+        bias=0.7,
+    )
+
+    # right action: dist > 0.5
+    prog.set_output_action(
+        action_idx=3,
+        h2_terms={"dist": 8.0},
+        bias=0.7,
+    )
+
+    # no-op: |dist| <= 0.5
+    prog.set_output_action(
+        action_idx=0,
+        h2_terms={"dist": -4.0, "target": 0.0, "p": 0.0},
+        bias=1.2,
+    )
+
+    # suppress useless actions
+    prog.output_bias = [0.0, 0.0, -4.0, 0.0, -4.0, -4.0]
+
+    return MLPCompilerBackend.compile(prog)
+```

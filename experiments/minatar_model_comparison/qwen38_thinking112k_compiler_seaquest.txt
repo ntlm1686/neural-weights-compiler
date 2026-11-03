@@ -1,0 +1,1838 @@
+We need answer user's request. Need design policy from scratch, no training, no forward pass, no rollouts, no feedback, no code execution. Output complete Python function build_policy() returns ExecutableMLP architecture 600 -> 32 -> 32 -> 6 tanh. Use NeuralCompiler IR and backend. Single attempt without testing. Need produce code block defining build_policy() that returns MLPCompilerBackend.compile(program). Need likely include imports? They say use following IR and backend. We can assume MLPProgram and MLPCompilerBackend available? Need output one complete Python code block defining build_policy(). It can import? Probably should not rely on relative imports? The provided backend has from .ir import MLPProgram. In answer, we can define build_policy that constructs MLPProgram and returns MLPCompilerBackend.compile(program). Need ensure within 32 H1 and 32 H2 units. Need design a plausible policy for Seaquest. Need no testing. Need think carefully.
+
+We need produce final code only? User: "Output a complete Python function build_policy() ... Return one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program). Do not train, test, run model forward passes or use feedback." So final should be code block. Could include comments. Need ensure code valid. Need use only prompt and IR/backend. We can define helper inside build_policy. Need not import numpy? The backend uses np. Our code may not need np except maybe not. We can use plain Python. Need ensure program dimensions: input_dim=600, h1_dim=32, h2_dim=32, output_dim=6.
+
+Need design policy. Let's understand environment and observation.
+
+SeaquestEnv: 10x10 grid? sub_y 0..8? Actually y max 8? In act: d: min(8, sub_y+1). So sub can be y 0..8? But state grid 10 rows? state[9,...] gauges. sub_y >0 oxygen decreases; at y=0 surface. If surface and diver_count==0 terminal; else surface reward. So must collect 6 divers then surface. Enemies spawn y 1..8. Diver spawn y 1..8. Bullets horizontal only. Sub orientation sub_or False left? In act: l sets sub_or=False, r True. Fire adds bullet [sub_x, sub_y, sub_or]. Bullet moves bullet[0] += 1 if bullet[2] else -1. If sub_or True, moves right; False left. So orientation is direction of last horizontal move; initial False (left). Fire shoots in orientation.
+
+Observation wrapper seaquest_obs: 10x10x6 float:
+channel 0 = sub_front | sub_back (sub position? front/back? state channel 0 sub, 1 back)
+channel 1 = enemy fish | enemy sub | enemy bullet (s channels 5,6,4)
+channel 2 = enemy fish | enemy sub | diver (5,6,9)
+channel 3 = friendly bullet (2)
+channel 4 = trail | sub_back? (3 | 1)
+channel 5 = oxygen_gauge | diver_gauge (7|8)
+Flatten row-major: index = (r*10 + c)*6 + ch. r row y? state uses state[y, x, channel]. So row 0 top surface, row 9 bottom gauges.
+
+Actions: 0 no-op, 1 left, 2 up, 3 right, 4 down, 5 fire. Sampling softmax; with prob 0.1 previous action repeated. We just output logits.
+
+Need design a handcrafted policy using 32 hidden units. Need robust enough? No testing. Need likely simple heuristic: collect divers, avoid enemies, shoot enemies in line, surface when 6 divers. But only 32 H1 and 32 H2. Need encode features.
+
+Input 600. We can create H1 threshold units detecting features:
+- diver_count? channel 5 includes oxygen and diver gauge at row 9. Diver gauge: state[9, 9 - diver_count:9, 8] = 1. So if diver_count=0, columns 9? slice 9:9 empty? Wait state[9, 9 - self.diver_count:9, 8] = 1. If count=0: 9:9 empty. count=1: 8:9 col8. count=6: 3:9 cols3-8. So number of 1s in row9 col3-8 channel5 equals diver_count. Oxygen gauge: state[9, 0:max(oxygen)*10//200,7]=1. oxygen 200 -> cols0-9? max(0,200)*10//200=10 -> 0:10 all. oxygen 100 -> 5 cols0-4. So channel5 row9 has oxygen gauge left part and diver gauge right part. Could detect low oxygen by absence? Hard.
+
+Need maybe use H1 units to count divers? With 32 units limited. Could detect if diver_count >=6 by checking row9 col3? If count=6, col3 is 1; if count<6, col3 0? For count 5: 4:9 cols4-8, col3 0. So H1 threshold on input idx row9 col3 ch5 >0 => six_divers. Good. Also maybe detect diver_count 0? row9 col8? count>0 => col8 1. But terminal if surface with 0 divers; we can avoid surfacing unless six? Actually if at surface and diver_count 0 terminal. Starting at surface with 0, first action must not be no-op? If action no-op at surface with 0, act: if sub_y>0 false, else if not surface? surface True initially, if diver_count==0 terminal. So no-op at start terminal. Need move down or collect? At start surface True, diver_count=0. If action down, sub_y=1, oxygen decreases, surface False. Good. If action left/right/up? up at y=0 stays y=0, surface True, diver_count 0 terminal. So initial must down (or maybe fire? fire at surface with 0 terminal? act: fire doesn't change y, then surface check terminal). So policy should output down when at surface and not six? But if six and at surface, should no-op? Actually if surface and diver_count==6, _surface gives reward, resets oxygen, diver_count=0, surface True. If then no-op with diver_count 0 terminal. Need immediately go down after surfacing. But observation after surface? If action no-op at surface with 6: act: spawn, fire? no, then surface check: sub_y=0, surface True, diver_count==6 -> r += _surface(), diver_count becomes 0, oxygen 200, surface True. Then returns terminal? terminal remains False. Next step if no-op terminal. So policy should not no-op at surface unless maybe just after? It should down when at surface and not six? But if six, to get reward you need be at surface and take any action? The surface reward occurs in act after action, if sub_y=0 and surface True. If you are at surface with 6, any action (including no-op) triggers surface reward, then diver_count 0. But then next step must down. If policy outputs down when at surface and not six, it won't surface with 6. Need output no-op (or any) when at surface and six to collect reward, then next step down. But with 0.1 repeat previous action, if previous was no-op, 10% repeat no-op causing terminal? But maybe okay. Could output down when at surface and not six, and no-op when at surface and six. But after no-op, next obs surface True diver_count 0, policy down. Good.
+
+Need detect at surface: sub at row0? channel0 has sub front/back at sub_y. Could detect sub_row0: any channel0 in row0? But sub_back may be row0 col x±1. If sub at row0, channel0 row0 has at least one. H1 threshold sum row0 ch0 >0. But if sub at row1, back? sub_back at same y, not row0. So okay.
+
+Need detect six_divers: row9 col3 ch5.
+
+Need detect divers present and maybe nearest diver? Channel2 includes divers and enemies. We need collect divers. Could simple: if any diver in same row, move horizontally toward it and fire? Divers move horizontally, can be collected by moving into them. Need avoid enemies.
+
+Given limited units, maybe design a simple survival policy: always move down unless at bottom? But need collect 6 divers to survive oxygen. Oxygen 200, each step below surface consumes 1. Need collect 6 divers, each spawn every 30 steps. To get 6 divers need at least 150 steps? Oxygen 200, possible if efficient. Need not just down. Need collect divers.
+
+Maybe use channel2 to detect divers. Could implement greedy: if diver in same row, move toward it; else move toward row with diver? But 32 units.
+
+Alternative: Use H1 units to compute directional sums for channel2 (divers+enemies) and channel1 (enemies+bullets) to choose action. But need distinguish divers from enemies? Channel2 includes enemies too, so not pure. Channel? obs channel2 = fish|sub|diver. No pure diver channel. But diver trail channel4? channel4 = trail | sub_back. Trail includes diver trail, enemy trail, sub_back. Not pure.
+
+Maybe use channel1 (enemy bullet/fish/sub) for danger, channel2 for targets (divers+enemies). Could treat any channel2 as target to approach, but enemies also. Need avoid channel1.
+
+Could design policy: prioritize avoiding immediate enemy in adjacent cells; else if diver? But no pure diver. Maybe use channel2 and channel1 difference? If a cell has channel2 but not channel1, likely diver (since enemies have channel1 and channel2; divers only channel2). Yes! obs channel1 = enemy fish|enemy sub|enemy bullet. channel2 = enemy fish|enemy sub|diver. So diver indicator = channel2 & ~channel1. We can create H1 units for diver presence in certain regions using RAW weights: + for ch2, - for ch1? But threshold with tanh can detect positive if ch2 without ch1. For a cell, input ch2=1, ch1=0 => sum 1; enemy both => 0; bullet ch1 only => -1. We can make H1 RAW with weights +1 on ch2, -1 on ch1 for selected cells, bias maybe 0, gain? But H1 type THRESHOLD multiplies weights by gain and bias -gain*threshold. If use weights +1/-1 threshold 0, output tanh(gain*sum). For diver sum=1 => +1; enemy sum=0 => 0; bullet sum=-1 => -1. Good. But if multiple cells, sum can be >1. We can use threshold 0.5? But THRESHOLD threshold applies to sum of weighted inputs. If weights +1/-1, threshold 0.5, diver one => +, enemy 0 => -, multiple divers maybe +. Good. But H1 unit can have many input weights. We can create diver detectors for rows/cols.
+
+Need 32 H1 units. Let's allocate:
+1. surface: row0 ch0 sum >0.
+2. six_divers: row9 col3 ch5 >0.
+3. low_oxygen? maybe row9 col0? Oxygen gauge: if oxygen low, col0? oxygen gauge fills from left: oxygen 200 all cols0-9; oxygen 100 cols0-4; oxygen 10 cols0? max(0,10)*10//200=0? 10*10//200=0, so no gauge? Actually integer: 10*10//200=0. So low oxygen maybe col0 absent? Hard. Could detect oxygen < 100 by col5? If oxygen 100 -> 5 cols0-4, col5 0; if >100 -> col5 1. So H1 threshold on row9 col5 ch5 >0 => oxygen >100. But not crucial.
+4-? Diver detectors: maybe 4 quadrants or rows.
+5-? Danger detectors: enemy in same row left/right, adjacent.
+
+H2 units 32 to combine into action logits.
+
+Need output logits for 6 actions. We can set output rules with H2 terms. Need ensure softmax chooses desired. We can make high positive logit for chosen action, negative for others. Since H2 outputs tanh in [-1,1]. We can set weights e.g. +10 for chosen, -10 for others? But output rules only add to W3 and bias. We can set bias for each action maybe -10, and for desired action add +20 via H2 terms. But H2 terms limited. Could create H2 units for each action priority: action_down, action_left, action_right, action_up, action_fire, action_noop. Then output rules: for each action, bias -10, and if action unit positive add +20. But if multiple action units active, multiple logits high. Need priority. Could design H2 action units mutually exclusive? Hard.
+
+Alternative output rules directly from H2 feature units with weights to create logits. We can set b3 all -10. For each action, add weights to H2 units that indicate conditions. Need ensure one action dominates. Could use priority by larger weights.
+
+Maybe simpler: create H2 units representing desired action as +1 when condition, else -1. Then output rule for that action: h2_terms {action_unit: 20}, bias -10. Other actions bias -10. If action_unit +1 => logit 10; if -1 => -30. But if multiple action units +1, multiple high. Need make conditions exclusive or priority. Could have a single H2 "mode" unit? But output needs 6.
+
+Could create H2 units for high-priority conditions and output rules with cascading weights. For example:
+- H2 surface_six: +1 if surface & six. Output no-op high.
+- H2 surface_not_six: +1 if surface & not six. Output down high.
+- H2 danger_left: +1 if enemy left adjacent? Output right high.
+- H2 danger_right: output left high.
+- H2 danger_up? output down high.
+- H2 danger_down? output up high.
+- H2 diver_left: output right? Wait if diver left, move left (action 1) to collect. Need orientation? Fire maybe.
+- H2 diver_right: output right.
+- H2 diver_up: output down? If diver above, move up? But up consumes? Actually y decreases up. If diver row < sub row, move up (action 2). If diver row > sub row, move down (action 4).
+- H2 default_down: output down.
+But many.
+
+Need detect sub position? To know relative direction to diver, need sub row/col. We can detect sub row/col via channel0. But 32 H1 limited. Could use spatial coordinate extractors? H1 threshold can sum channel0 with col_weights to estimate sub_x? But threshold binary not value. Could create H1 units for sub in left half/right half/top/bottom. For direction to diver, maybe use diver in left half and sub in right half => move left. But need sub position. Could detect sub_left_half: sum ch0 cols0-4 >0. sub_right_half: cols5-9. sub_top_half: rows0-4. sub_bottom_half: rows5-8. Diver_left_half: diver indicator cols0-4. Diver_right_half. Diver_top_half. Diver_bottom_half. Then H2: if diver_left and sub_right => move left; if diver_right and sub_left => move right; if diver_top and sub_bottom => move up; if diver_bottom and sub_top => move down. But if same half, maybe default.
+
+But H1 units: surface, six, sub_left, sub_right, sub_top, sub_bottom, diver_left, diver_right, diver_top, diver_bottom, danger_left, danger_right, danger_up, danger_down, maybe enemy_same_row_left/right, oxygen_low. That's ~15. H1 32 okay.
+
+Need H2 units: combine. Could use add_h2_gate with h1_terms. H2 output tanh(sum w*h1 + bias). H1 outputs approx +1/-1/0. We can create H2 condition units:
+- h2_surface_six = surface & six: terms surface:10, six:10, bias -15? If both +1 => 5, tanh ~1; if one => -5? Wait 10+10-15=5; one +1 other -1 => -5; both -1 => -35. Good.
+- h2_surface_not_six = surface & not six: terms surface:10, six:-10, bias -15? If surface +1, six -1 => 10+10-15=5; if six +1 => -15? Good. But six unit may be 0 if no? threshold gives -1 when false. Good.
+- h2_danger_left: enemy in left adjacent? Need H1 danger_left +1. Could just pass.
+- h2_danger_right.
+- h2_danger_up.
+- h2_danger_down.
+- h2_diver_left: diver_left & sub_right? terms diver_left:10, sub_right:10, bias -15.
+- h2_diver_right: diver_right & sub_left.
+- h2_diver_up: diver_top & sub_bottom.
+- h2_diver_down: diver_bottom & sub_top.
+- h2_default_down: maybe not surface and no danger? Could just output down default via bias.
+Need maybe fire if enemy in same row and orientation? Hard.
+
+But H2 units 32 enough.
+
+Need H1 danger detectors. Enemy channel1. We can detect enemy in adjacent cells relative to sub? Need sub position. Without exact sub, can detect enemy in left half? But immediate danger: enemy bullet/fish/sub in same row adjacent? Could use channel1 in row? Need sub row. Could detect enemy_left: any enemy in cols0-4? Not adjacent. Maybe use channel1 left half and sub right half => danger_left. But not immediate. Could output move away from enemy half.
+
+Maybe simpler: use channel1 (enemy) half detectors: enemy_left, enemy_right, enemy_top, enemy_bottom. H2: if enemy_left and sub_right => move right; if enemy_right and sub_left => move left; if enemy_top and sub_bottom => move down; if enemy_bottom and sub_top => move up. This avoids enemies coarsely.
+
+But need collect divers. Diver half detectors using ch2-ch1.
+
+Need H1 units for half detectors:
+- sub_left: sum ch0 cols0-4 >0. But sub_back may be in other half if sub at col5? sub_front at col5, back col6? If sub_or True, back_x = sub_x+1? Wait state: back_x = sub_x - 1 if sub_or else sub_x + 1. sub_or True means facing right? In act r sets sub_or=True. Fire moves right if sub_or True. state back_x = sub_x -1 if sub_or else sub_x+1. So if facing right, back is left. If sub at col5 facing right, front col5, back col4. channel0 includes both. sub_left detector cols0-4 would see back at col4, so sub considered left even if front col5. Could be okay. But if sub at col0 facing left? back_x =1? sub_or False -> back_x=sub_x+1=1, front col0. sub_left sees both. If sub at col9 facing right, back_x=8, sub_right sees. Good.
+- sub_right: cols5-9.
+- sub_top: rows0-4? sub_y 0..8. top rows0-4, bottom rows5-8. But row9 gauges no sub.
+- sub_bottom: rows5-8.
+- enemy_left: channel1 cols0-4 sum >0.
+- enemy_right: cols5-9.
+- enemy_top: rows0-4? enemies y1..8, bullets can row0? maybe. top rows0-4, bottom rows5-8.
+- enemy_bottom: rows5-8.
+- diver_left: diver indicator cols0-4. Use weights +1 ch2, -1 ch1 for cols0-4 all rows? threshold 0.5. But if multiple enemies and divers, sum could be negative. Need detect any diver in left half. If one diver and many enemies, sum may be <=0. Could use larger weight for ch2? e.g. +2 ch2, -1 ch1, threshold 0.5. One diver with one enemy: 2-1=1 >0.5; with two enemies: 0 <0.5. But maybe okay. Could use +3, -1. But if many enemies, false negative. Could use separate cell? Hmm.
+Maybe use channel2 only for diver target, accept enemies as targets? But then may move into enemies. Could use channel1 danger priority higher.
+
+Could create diver detectors using ch2 only, and rely on danger to avoid. But if enemy and diver same half, target may be enemy. Danger priority can override.
+
+H1 diver_left: sum ch2 cols0-4 >0. But enemies also. Diver_right etc.
+
+Need six_divers: row9 col3 ch5. But channel5 includes oxygen gauge and diver gauge. At row9 col3, oxygen gauge may also be 1 if oxygen high. Wait channel5 = oxygen_gauge | diver_gauge. Oxygen gauge at row9 cols0..oxygen*10//200 -1. If oxygen high, col3 is 1 due to oxygen, not diver. So six_divers detection via row9 col3 ch5 is wrong because oxygen gauge overlaps. Need distinguish diver gauge? Diver gauge at cols 9-count to 8. Oxygen gauge at cols 0 to oxygen/20 -1. They can overlap. For count=6, diver gauge cols3-8. Oxygen gauge if oxygen >=80? 80*10//200=4 -> cols0-3, so col3 also oxygen. If oxygen low <80, col3 only diver. But oxygen may be high. Need detect six divers differently. Diver_count=6 => diver gauge cols3-8 all 1. Could detect col8? Diver gauge always includes col8 if count>0. Oxygen gauge may include col8 if oxygen >=160? 160*10//200=8 -> cols0-7, not col8. If oxygen=200, cols0-9 includes col8. So col8 can be oxygen. Need maybe detect pattern of 6? Hard with one unit. Could detect diver_count >=6 by checking col3 and maybe col4? Oxygen can also. But if oxygen high, many cols. Need maybe use absence? Diver gauge is right-aligned: count=6 => cols3-8. count=5 => cols4-8. So col3 is 1 iff count=6 OR oxygen gauge extends to col3 (oxygen >=80). Since oxygen often high, not reliable. Could detect count=6 by col3=1 and col2=0? Diver gauge count=6 col2=0; oxygen gauge if oxygen >=80 col2=1 (if oxygen >=60? 60*10//200=3 -> cols0-2). If oxygen high, col2=1. If oxygen low, col2=0. Not reliable.
+
+Maybe use diver_count via number of divers in channel2? Need collect 6 divers, but observation doesn't show carried divers except gauge. Could count divers on screen? Not carried. Need know when to surface. Could use oxygen low? Maybe surface when oxygen low? But need 6 divers for reward; if not 6, surface terminal. Could maybe never surface until oxygen low? Terminal if oxygen <=0. Need collect 6. Need detect diver_count.
+
+Can we detect diver_count from gauge using multiple H1 units? We have 32 H1. Could create units for each gauge column? But oxygen interference. Maybe use channel5 row9 columns and infer count from rightmost? Diver gauge occupies cols 9-count to 8. Oxygen occupies left. There may be a gap between oxygen and diver gauge if oxygen + count < 20? Actually oxygen gauge length = oxygen*10//200 (0..10). diver gauge length = count (0..6) at right. If oxygen_len + count < 10, there is gap. If count=6, diver starts col3. If oxygen_len <=2, col3 is diver only. If oxygen_len >3, overlap. But oxygen decreases over time; when collecting 6 divers, oxygen likely low? Starting 200, need at least 150 steps, oxygen <=50. So oxygen_len <=2. Then col3 indicates count=6. Good. Could rely on low oxygen when 6 divers. But if ramping? Maybe. Could also detect count=6 by col3=1 and col0? oxygen low? Hmm.
+
+Maybe create H1 six_divers as row9 col3 ch5 AND NOT oxygen_high? Need H1 only one layer from input, can use weights + for col3, - for oxygen high indicator? Oxygen high if col8? If oxygen high, col8=1. But diver gauge count>0 also col8=1. Can't. Use col0? oxygen low? If oxygen low, col0 maybe 1 if oxygen>=20? 20*10//200=1. If oxygen <20, col0=0. Not.
+
+Could detect six divers by diver gauge col3=1 and col2=0? If oxygen low (<60), col2=0. When 6 divers, oxygen likely <60? Need 6 divers spawn every 30, min 150 steps, oxygen <=50. Yes. So six_divers: + col3, - col2, threshold 0.5. If count=6 and oxygen low: col3=1, col2=0 => 1. If count<6: col3=0 (unless oxygen high) but if oxygen high and count<6, col3=1, col2=1 => 0. If count=6 and oxygen high: col3=1, col2=1 => 0 (false negative). But oxygen high unlikely when 6. Good. Could use +2 col3, -1 col2 threshold 0.5: count6 low =>2; count6 high =>1 >0.5 false positive. Maybe +1 -1 threshold 0.5 better.
+
+Need detect surface. Surface if sub_y=0. channel0 row0. But if sub at row0, channel0 row0 has front/back. Good.
+
+Need detect at bottom? sub_y=8? Could avoid moving down at bottom. Detect sub_bottom_row8: row8 ch0 >0. If at bottom, don't down. But sub_bottom half includes row5-8. Could create sub_row8. H1.
+
+Need maybe detect no-op? Only surface_six.
+
+Need action selection. Let's design H1 list (max 32):
+0 surface: row0 ch0 sum >0.
+1 six_divers: row9 col3 ch5 +1, row9 col2 ch5 -1, threshold 0.5. (Maybe also col4? no)
+2 sub_left: ch0 cols0-4 sum >0.
+3 sub_right: ch0 cols5-9 sum >0.
+4 sub_top: ch0 rows0-4 sum >0.
+5 sub_bottom: ch0 rows5-8 sum >0.
+6 sub_row8: ch0 row8 sum >0.
+7 enemy_left: ch1 cols0-4 sum >0.
+8 enemy_right: ch1 cols5-9 sum >0.
+9 enemy_top: ch1 rows0-4 sum >0.
+10 enemy_bottom: ch1 rows5-8 sum >0.
+11 diver_left: ch2 cols0-4 sum >0. (or ch2-ch1)
+12 diver_right: ch2 cols5-9 sum >0.
+13 diver_top: ch2 rows0-4 sum >0.
+14 diver_bottom: ch2 rows5-8 sum >0.
+15 oxygen_low? maybe row9 col0? If oxygen low, col0? oxygen_len = oxygen*10//200. oxygen<20 => 0. Could detect oxygen_low: NOT col0? But threshold on -col0? H1 threshold can have negative weights. Use input_weights {col0: -1}, threshold -0.5? sum = -1 if col0=0, threshold -0.5 => -1 - (-0.5) = -0.5? Wait THRESHOLD: tanh(gain*(sum - threshold)). If weight -1, col0=0 => sum=0; threshold -0.5 => 0.5 positive. col0=1 => -1 - (-0.5)=-0.5 negative. So output + when col0=0. But oxygen low maybe col0=0. Could use. But not necessary.
+16 enemy_same_row_left? Hard without sub row.
+Maybe use channel1 adjacent to sub? Could create H1 units for enemy in each of 8 neighbor cells? Need sub position exact. Could use sub front channel0 to gate? H1 cannot AND input with sub? It can use weights: for each cell, + enemy if sub at that cell? But sub position variable. Could create for each possible sub position? Too many. But maybe 8 neighbor danger units using product? H1 linear cannot multiply sub and enemy. But can use channel0 and channel1 weights: For a cell to be enemy left of sub, need sub at (r,c+1) and enemy at (r,c). Linear sum can't detect conjunction. H2 can AND H1 units, but H1 units would need sub_at_cell and enemy_at_cell. Too many.
+
+Coarse half avoidance okay.
+
+Need H2 units (max 32). We can create condition units:
+0 surface_six: surface & six.
+1 surface_not_six: surface & not six.
+2 danger_left: enemy_left & sub_right? (enemy in left half, sub in right half) => move right.
+3 danger_right: enemy_right & sub_left => move left.
+4 danger_top: enemy_top & sub_bottom => move down.
+5 danger_bottom: enemy_bottom & sub_top => move up.
+6 diver_left: diver_left & sub_right => move left.
+7 diver_right: diver_right & sub_left => move right.
+8 diver_up: diver_top & sub_bottom => move up.
+9 diver_down: diver_bottom & sub_top => move down.
+10 bottom: sub_row8 (pass) maybe to avoid down.
+11 top? surface? maybe.
+12 default_down: not surface? Could just bias.
+Need maybe fire: if enemy in same half? Could fire when enemy in front? Need orientation. Could detect enemy_left and sub_right? If enemy left, maybe face left and fire? But moving away maybe safer. Fire can kill enemies in line. But orientation unknown. Could output fire when enemy in same row half? Hard.
+
+Maybe include fire if enemy in same half horizontally and sub not? But firing may be useful. However fire has cooldown 5. Could output fire when enemy_left & sub_right? But if enemy left, moving right avoids, firing left requires orientation left. If sub_or maybe not. Could ignore fire.
+
+Need ensure action sampling with 0.1 repeat previous. If policy outputs down at surface_not_six, good. If surface_six outputs no-op, then next down. But if previous action no-op repeated 10% at surface after reset? terminal. Could instead output down for surface_six too? But then no surface reward. Need no-op once. Could output fire? Any action triggers surface. But if previous action was down, 10% repeat down after surface? If at surface with 6 and action down, act: down moves to y=1, then surface check? sub_y>0 so no surface, diver_count remains 6, oxygen decreases. You miss reward but can still collect? Diver_count 6, if later surface with 6 reward. But if you move down with 6, okay. But to get reward need eventually surface. If policy never no-op at surface, it will avoid surface when 6? It might move down when surface_six, so never collect reward, oxygen depletes. Need surface. Could output no-op only when surface_six. Risk 10% repeat no-op after surface reset. But maybe previous action before surface was no-op? Sequence: at surface with 6, policy no-op. After act, surface reward, diver_count 0, sub_y=0, surface True. Next obs surface_not_six, policy down. But sampling: with prob 0.1 previous action (no-op) repeated, causing terminal. 10% failure. Could mitigate by outputting a non-noop action that triggers surface and also if repeated not terminal? If at surface with 6, action down triggers? Let's see: if a='d', sub_y becomes 1. Then later surface check: sub_y>0, so no surface, diver_count remains 6. Not terminal. If repeated down next step, sub_y=2, okay. But you didn't surface reward. But you can later surface when 6. If policy at surface with 6 outputs down, it will leave surface, then later when 6 and at surface? It may not return to surface. Need a policy to surface when 6. Could output up when at row1 and 6? But if at surface, to trigger surface you must be at y=0 and take action. If you take down, you leave. You need be at y=0. How get to y=0? Move up. If policy when six and not surface moves up, it will reach surface, then next step at surface with six. If at surface with six, if policy outputs up, act: up at y=0 stays y=0, surface check triggers reward, diver_count 0. If previous action up repeated 10% after reset: at surface with 0, up stays y=0, terminal. Same risk. If policy outputs left/right at surface with six, triggers reward; if repeated after reset, left/right at surface with 0 terminal. Any action at surface with 0 terminal except down. So after surface reset, must down. The 10% repeat of previous surface action causes terminal if previous not down. Could choose previous action before surface to be down? But to be at surface, previous action likely up. Could design policy: when six and row1, output up; when surface_six, output down? But down at surface_six doesn't trigger reward. Wait if at surface with six and output down, no reward. But maybe you can trigger reward by being at surface and previous action? The surface check happens after action. If action down, sub_y becomes 1, no surface. So no. Need an action that doesn't change y? no-op, up, left, right, fire. All if repeated after reset terminal. Unless action is down? But down doesn't trigger. So unavoidable 10% risk if you surface. Could maybe surface when previous action was down? How can previous action be down and still be at surface? If you were at y=1 and action up, previous becomes up. If you were at y=0 and action down, you leave. So no. Could use 0.1 repeat to your advantage? Not.
+
+Maybe policy can output no-op at surface_six and accept 10% terminal. Or output fire? same.
+
+Could avoid terminal after surface by if surface_not_six and previous action? Policy doesn't see previous action. But sampling repeats previous with 0.1. If previous was no-op, 10% no-op. Can't prevent.
+
+Maybe output down at surface_six to avoid immediate terminal, and use a different mechanism to surface: when six and row1, output up; when surface_six, output down (miss reward) but then diver_count remains 6, you go down, later maybe oxygen low? Not good. Could when six and row1 output up, at surface_six output no-op. Accept.
+
+Need maybe detect row1 to move up when six. H1 sub_row1: row1 ch0 >0. H2 six_row1: six & row1 => up. But if six and row0, no-op. If six and row>1, maybe up. Could create six_not_surface: six & not surface => up. H2.
+
+H2 units:
+- surface_six
+- surface_not_six
+- six_not_surface (six & not surface) => up
+- danger_left, danger_right, danger_top, danger_bottom
+- diver_left, diver_right, diver_up, diver_down
+- bottom (sub_row8)
+- maybe top? surface? 
+- default_down? Could use H2 not_surface? But output bias can default down.
+
+Need output logits. Let's define H2 units with names.
+
+H1 details:
+Use add_h1_threshold with input_weights mapping. For sum >0 threshold 0.5? If inputs binary 0/1, sum integer. threshold 0.5 gives + if >=1. gain 10.
+For six_divers with +col3 -col2 threshold 0.5: if col3=1,col2=0 sum=1 => +; if 0,0 sum=0 => -; if 1,1 sum=0 => -; if 0,1 sum=-1 => -. Good.
+For diver detectors maybe use ch2 - ch1? Let's consider. If use ch2 only, enemies count. But danger priority may override. However diver_left may be true due to enemy, causing move toward enemy if no danger? But danger_left also true if enemy_left & sub_right. If enemy in left half and sub right, danger_left priority can override diver_left. If enemy in left half but sub left, danger_left false, diver_left true due to enemy, may move left into enemy. Could use ch2-ch1 to reduce. Let's use diver indicator weights: +2 on ch2, -1 on ch1 for selected half, threshold 0.5. If one diver no enemy: 2. If one enemy no diver: -1. If one diver one enemy: 1 >0.5. If one diver two enemies: 0 <0.5. Good. Use gain 10. But THRESHOLD multiplies weights by gain, threshold 0.5. Good.
+For enemy detectors use ch1 sum >0 threshold 0.5.
+For sub detectors use ch0 sum >0 threshold 0.5.
+For surface row0 ch0 sum >0.
+For sub_row8 row8 ch0 sum >0.
+For sub_row1 row1 ch0 sum >0 maybe.
+For oxygen_low? maybe not.
+
+H1 count: surface, six, sub_left, sub_right, sub_top, sub_bottom, sub_row8, sub_row1, enemy_left, enemy_right, enemy_top, enemy_bottom, diver_left, diver_right, diver_top, diver_bottom = 16. Could add enemy_near? Maybe not.
+
+H2 units:
+1 surface_six = surface & six
+2 surface_not_six = surface & not six
+3 six_not_surface = six & not surface
+4 danger_left = enemy_left & sub_right
+5 danger_right = enemy_right & sub_left
+6 danger_top = enemy_top & sub_bottom
+7 danger_bottom = enemy_bottom & sub_top
+8 diver_left = diver_left & sub_right
+9 diver_right = diver_right & sub_left
+10 diver_up = diver_top & sub_bottom
+11 diver_down = diver_bottom & sub_top
+12 bottom = sub_row8 (pass)
+13 top? maybe surface? not needed.
+14 default_down = not surface? Could create not_surface = -surface? H2 gate with h1_terms {surface: -10}, bias 5? If surface -1 => 10+5=15; if surface +1 => -10+5=-5. So not_surface. But output default can be bias.
+15 maybe fire = enemy_left & sub_right? But danger already. Could fire if enemy in same horizontal half and not danger? Hmm.
+
+Need output rules. We can set b3 = [-10, -10, -10, -10, -10, -10] maybe. Then add weights to action logits based on H2.
+Priority:
+1. If surface_six: no-op (0) high.
+2. If surface_not_six: down (4) high.
+3. If six_not_surface: up (2) high (to surface).
+4. If danger_left: right (3) high.
+5. If danger_right: left (1) high.
+6. If danger_top: down (4) high.
+7. If danger_bottom: up (2) high.
+8. If diver_left: left (1) high.
+9. If diver_right: right (3) high.
+10. If diver_up: up (2) high.
+11. If diver_down: down (4) high.
+12. If bottom: up? or no-op? If at bottom, avoid down. Could output up or horizontal. Maybe if bottom and no other, up.
+13. Default: down (4) moderate.
+
+But if multiple H2 active, logits add. Need priority by weights. We can assign larger weights to higher priority. For each action logit, sum weights from active H2. If lower priority active but higher priority action different, could still compete. Example surface_six active (no-op +100) and danger_left active (right +50) => no-op wins. Good. But if surface_six active and surface_not_six not. Need ensure H2 units mutually? surface_six and surface_not_six exclusive if six unit binary. six_not_surface exclusive with surface. Danger and diver can co-occur. Priority weights: surface 100, six_not_surface 80, danger 60, diver 40, bottom 30, default 10. But if danger_left and diver_right both active, right gets 60+40=100, left gets 40. Good. If danger_left and diver_left both active, right 60, left 40, right wins. If danger_top and diver_down both active, down 60+40=100, up? danger_bottom maybe. Good.
+
+But H2 units output tanh, not exactly +1. We can design gates to output near +1 when true, -1 when false. Weights in output can be e.g. 20. If H2 false -1, it subtracts. That's okay. But if a H2 false contributes negative to its action, could lower logit. We can set output weights positive only; false H2 -1 reduces logit by weight, making it less likely. Good.
+
+Need define H2 gates. add_h2_gate(name, h1_terms, bias). H1 outputs approx +1/-1. For AND of two positive: terms {a:10, b:10}, bias -15. If both +1 => 5 => tanh 0.9999; if one +1 one -1 => -5 => -0.9999; if both -1 => -35. Good. For AND with NOT: terms {a:10, b:-10}, bias -15. If a +1, b -1 => 5; if a +1,b +1 => -15; if a -1,b -1 => -5? Wait a=-1,b=-1: -10 +10 -15 = -15. Good. If a=-1,b=+1: -10-10-15=-35. So true only a true b false.
+For pass: terms {a:10}, bias 0? If a +1 => 10, -1 => -10. Good.
+
+H2 names:
+h2_surface_six: {surface:10, six:10}, bias -15
+h2_surface_not_six: {surface:10, six:-10}, bias -15
+h2_six_not_surface: {six:10, surface:-10}, bias -15
+h2_danger_left: {enemy_left:10, sub_right:10}, bias -15
+h2_danger_right: {enemy_right:10, sub_left:10}, bias -15
+h2_danger_top: {enemy_top:10, sub_bottom:10}, bias -15
+h2_danger_bottom: {enemy_bottom:10, sub_top:10}, bias -15
+h2_diver_left: {diver_left:10, sub_right:10}, bias -15
+h2_diver_right: {diver_right:10, sub_left:10}, bias -15
+h2_diver_up: {diver_top:10, sub_bottom:10}, bias -15
+h2_diver_down: {diver_bottom:10, sub_top:10}, bias -15
+h2_bottom: {sub_row8:10}, bias 0
+h2_not_surface: {surface:-10}, bias 5? Let's compute: surface +1 => -10+5=-5 (false), surface -1 => 10+5=15 (true). Good.
+h2_default_down: maybe not_surface & not bottom? Could just use not_surface. But if bottom, default down bad. Could create h2_default_down = not_surface & not bottom: terms {surface:-10, sub_row8:-10}, bias -15? If surface -1, bottom -1 => 10+10-15=5 true. If surface +1 => -15? If bottom +1 => -15. Good.
+h2_bottom_up: bottom & not_surface? bottom implies not surface. pass bottom maybe.
+Need maybe h2_fire? Could create fire if enemy in same horizontal half and sub facing? No orientation. Maybe skip.
+
+Output rules:
+Set output_bias = [-10, -10, -10, -10, -10, -10] maybe. Then:
+Action 0 no-op: h2_surface_six: 100
+Action 1 left: h2_danger_right: 60, h2_diver_left: 40, maybe h2_bottom? no.
+Action 2 up: h2_six_not_surface: 80, h2_danger_bottom: 60, h2_diver_up: 40, h2_bottom: 30
+Action 3 right: h2_danger_left: 60, h2_diver_right: 40
+Action 4 down: h2_surface_not_six: 100, h2_danger_top: 60, h2_diver_down: 40, h2_default_down: 10
+Action 5 fire: maybe h2_danger_left? Could add small? But if fire, no movement. Maybe not.
+But if no H2 active, all logits -10, uniform. Need default down. h2_default_down active when not surface and not bottom, adds 10 to down => 0 vs -10. Good. If bottom, h2_bottom adds 30 to up => 20 vs -10, so up. If surface_not_six, down 90. If surface_six, no-op 90. If six_not_surface, up 70 plus default? six_not_surface implies not surface, if not bottom default_down also active adds 10 to down, so up 70 vs down 0, up wins. If bottom and six_not_surface, up 70+30=100, down? default false, -10. Good.
+
+But H2 false negative contributions: For action down, h2_surface_not_six false -1 *100 = -100, h2_danger_top false -60, h2_diver_down false -40, h2_default_down maybe +10. If none true, down logit = -10 -100 -60 -40 +10? Wait output rule adds weights for all listed H2 terms, regardless true/false. If H2 false = -1, it subtracts weight. That can make logits very negative. That's okay if all actions have false penalties. But need ensure desired action not penalized by false high-priority units. Example default state: not surface, not bottom, no danger/diver. H2: surface_six false, surface_not_six false, six_not_surface false, dangers false, divers false, bottom false, default_down true. Logits:
+no-op: -10 + 100*(-1) = -110
+left: -10 +60*(-1)+40*(-1)= -110
+up: -10 +80*(-1)+60*(-1)+40*(-1)+30*(-1)= -220
+right: -10 +60*(-1)+40*(-1)= -110
+down: -10 +100*(-1)+60*(-1)+40*(-1)+10*(+1)= -200? That's bad: down gets -200, lower than others -110. Because false high weights penalize down heavily. We need avoid false penalties or use H2 units that output 0 when false, not -1. But H2 tanh gates output -1 false. Could use output weights only on H2 units that are true? Can't. Could design H2 units as one-hot? Maybe use H2 units that output +1 true, 0 false? With tanh, can we get 0 false? Use threshold? H2 is tanh linear of H1. If H1 are +1/-1, hard to get 0. Could use H1 units that are +1 true, 0 false? H1 threshold with inputs binary can output +1 true, -1 false. Not 0. But we can use H1 RAW with bias to output 0? tanh(0)=0. For detectors, we can make H1 output +1 when true, 0 when false by using threshold? If sum >=1, want z positive; if sum=0, want z=0. THRESHOLD with threshold 0? sum=0 => tanh(0)=0; sum=1 => tanh(gain)=+1. But if negative weights can sum negative. For simple positive sum detectors, use threshold 0, not 0.5. Then false 0, true +1. Good! For six_divers with +col3 -col2, false could be 0 or negative. We can use threshold 0? If col3=1,col2=0 sum=1 => +; if 0,0 sum=0 => 0; if 1,1 sum=0 => 0; if 0,1 sum=-1 => -1. Good. So H1 detectors can be 0 false, +1 true, maybe -1 for negative. Then H2 gates can be designed to output 0 false? H2 tanh of sum of H1 (0/+1) with bias. For AND: terms {a:10,b:10}, bias -15. If both 1 => 5 +; if one 0 => -15 -; not 0. Could use bias -5? If both 1 => 15 +; if one 0 => -5 -; still negative. To get 0 false, need bias 0 and use? If both 1 =>20 +, if one 0 =>10 + (false positive). Not. Could use H2 as threshold with negative? Tanh can't output 0 for negative unless z=0. Could set bias such that false z=0: for AND of two 0/1, need bias = -10? If one true: 10-10=0; both true:20-10=10; none: -10 (negative). Not 0. Could add a term for OR? Hard.
+
+Alternative output rules can use H1 directly? Output only H2 terms. But H2 can be pass of H1 with bias 0: if H1 0/+1, H2 0/+1. For conditions requiring AND, H2 false negative. But maybe we can avoid AND by using H1 half detectors and output weights with positive/negative to implement priority? Output is linear in H2. If H2 are 0/+1 pass, false no penalty. We can create H2 pass units for H1 detectors (0/+1). Then output logits can combine with positive weights. But need AND conditions (e.g., surface & six). Could create H2 AND units that output +1 true, -1 false, but use them only for high priority with bias? False penalties issue. Could instead create H2 AND units that output +1 true, 0 false? Is it possible with tanh and H1 0/+1? We can use a H2 unit with terms {a:10,b:10}, bias -10. If both 1 =>10 (+), one 0 =>0 (0), none => -10 (-). So false with one true gives 0, none negative. If H1 false 0, true 1. For AND, one true false => 0, good; none => -1 (negative). Negative only when neither true. That may penalize actions when neither condition true. But if all actions have such negative, maybe okay? Could set bias -10, and ensure at least one of a/b true for relevant? Not always. For surface_six, if neither surface nor six, H2 -1, penalizes no-op. But no-op should be low anyway. For default down, if we use AND units with negative when false, down may be penalized. Could use pass units for default.
+
+Maybe design H1 detectors as 0/+1 (threshold 0). H2 AND units with bias -10*number? For AND of two: bias -10 gives one true 0, both true +10, none -10. For AND with NOT where H1 not? Need NOT units 0/+1? We can create H1 not_surface? H1 threshold with negative weight? If surface detector 0/+1, not_surface can be H2 pass? H2 {surface:-10}, bias 5? If surface 0 =>5 (+), surface 1 => -5 (-). Not 0. Could create H1 not_surface using input weights negative on row0 ch0, threshold 0: if no surface sum=0 =>0, if surface sum=-1 => -1. Not 0/+1. Could invert by using bias? H1 RAW: weights -1 on surface inputs, bias 0 => 0 if no surface, -1 if surface. Not +1. Could use threshold? THRESHOLD with negative weights and threshold 0: no surface 0, surface -1. Not.
+
+Maybe use H1 detectors as +1 true, -1 false (threshold 0.5) and H2 gates +1/-1. Output false penalties can be managed by setting output_bias high and weights not too large? Let's analyze. If all H2 false -1, each action logit = bias - sum(weights). If bias = -sum(weights) + desired? We can set output_bias per action to cancel false penalties, so when all false logit 0. Then true adds 2*weight? For each action, if we list H2 terms with weights w, and all those H2 false (-1), logit = b3 - sum w. Set b3 = sum w + base. Then false state logit = base. If a H2 true (+1), logit = base + 2w. This is good! We can set output_bias for each action to sum of weights for that action plus base (e.g., 0). Then false H2 no relative penalty, true boosts. This solves. Need ensure if multiple H2 true, boosts add. Great.
+
+So use H1 threshold 0.5 => +1/-1. H2 gates +1/-1. Output rules: for each action, h2_terms weights, bias = sum(weights) + base. Then if all terms false (-1), logit = base. If term true, +2w. We can set base = 0 or -10. But if base same, default action needs some H2 true or bias higher. We can set base for down higher? But output_bias can be set per action. We can set b3 initially maybe 0 for all, then for each rule bias = sum(weights) + base_action. Choose base_action: down 10, others 0. Then default down logit 10, others 0. If high priority true, boost 2w. Need weights priority.
+
+Let's define output weights and biases accordingly.
+For action 0: terms {surface_six: 50}. bias = 50 + base0 (0) = 50. If surface_six false: 0; true: 100.
+Action 1: terms {danger_right:30, diver_left:20}. bias=50. false:0; true danger_right:60; diver_left:40; both:80.
+Action 2: terms {six_not_surface:40, danger_bottom:30, diver_up:20, bottom:15}. bias=105. false:0; true six:80; danger_bottom:60; diver_up:40; bottom:30; combinations add.
+Action 3: terms {danger_left:30, diver_right:20}. bias=50.
+Action 4: terms {surface_not_six:50, danger_top:30, diver_down:20, default_down:5}. bias=105 + base_down? If base_down=10, bias=115. false:10; true surface_not_six:110; danger_top:70; diver_down:50; default_down:20. Good.
+Action 5: maybe terms {fire_condition:10}. bias=10. false 0. Could skip fire (bias 0). But if no fire terms, b3[5]=0.
+
+Need ensure high priority: surface_six true gives no-op 100, down maybe if surface_not_six false, default? surface true => default_down false? default_down = not_surface & not_bottom, so false. down logit base 10. no-op wins. surface_not_six true: down 110, no-op 0. six_not_surface true: up 80, down base 10 (default maybe true if not bottom) => up wins. danger_left true: right 60, down maybe 10, left? if danger_right false. Good. danger_top true: down 70, up? if danger_bottom false 0. Good. diver_left true: left 40, down 10. Good. bottom true: up 30, down base 10 (default false if bottom) => up. If bottom and diver_down true: down 50, up 30 => down, but at bottom down invalid? sub_y min 8, down at bottom stays 8, oxygen decreases, not terminal but bad. Could priority bottom over diver_down? Maybe bottom should avoid down. Set bottom weight 40, diver_down 20. Then bottom+diver_down: up 80, down 50, up wins. But if six_not_surface true and bottom: up 80+80=160. Good. Set bottom weight 40. Action2 bias = 40+30+20+40=130. false 0.
+
+Need default_down H2: not_surface & not_bottom. With H1 +1/-1. Use AND with NOT: terms {surface:-10, sub_row8:-10}, bias -15. If surface -1, bottom -1 => 5 true; if surface +1 => -15; if bottom +1 => -15. Good.
+
+Need H1 detectors with threshold 0.5 to get +1/-1. For positive sum detectors, threshold 0.5. For six_divers with +col3 -col2 threshold 0.5: if true sum=1 => +; false sum=0 => -? 0-0.5=-0.5 => -1. Good. If col3=1,col2=1 sum=0 => -1. Good.
+For diver detectors with +2 ch2 -1 ch1 threshold 0.5: if no diver/enemy sum=0 => -1; if enemy only sum=-1 => -1; if diver only sum=2 => +1; if diver+enemy sum=1 => +1; if diver+2 enemies sum=0 => -1. Good.
+
+Need H1 input index calculation. Input dim 600, grid 10x10x6 row-major: idx = (r*10 + c)*6 + ch. Channels in obs: 0 sub, 1 enemy, 2 target, 3 friendly bullet, 4 trail, 5 gauge.
+We can write helper idx(r,c,ch).
+For half detectors, build dict weights.
+sub_left: ch0 cols0-4 all rows? Should include row9? no sub at row9. Use rows0-8 maybe. If include row9 no effect. Use rows0-8.
+sub_right: cols5-9 rows0-8.
+sub_top: rows0-4 all cols ch0.
+sub_bottom: rows5-8 all cols ch0.
+sub_row8: row8 all cols ch0.
+sub_row1: row1 all cols ch0 (maybe not needed if six_not_surface uses not surface).
+surface: row0 all cols ch0.
+enemy_left: ch1 cols0-4 rows0-8? enemies y1-8, bullets can row0? include rows0-8. row9 no enemy. Use rows0-8.
+enemy_right: cols5-9.
+enemy_top: rows0-4 all cols ch1.
+enemy_bottom: rows5-8 all cols ch1.
+diver_left: for rows0-8 cols0-4: weight +2 on ch2, -1 on ch1. But if multiple cells, sum can be large. threshold 0.5. Good.
+diver_right: cols5-9.
+diver_top: rows0-4 all cols.
+diver_bottom: rows5-8 all cols.
+six_divers: row9 col3 ch5 +1, row9 col2 ch5 -1. threshold 0.5.
+Maybe oxygen_low? not.
+
+H1 count 16. Good.
+
+H2 count: surface_six, surface_not_six, six_not_surface, danger_left, danger_right, danger_top, danger_bottom, diver_left, diver_right, diver_up, diver_down, bottom, default_down = 13. Good.
+
+Need ensure H2 names not duplicate H1? H2 references H1 names. We have H1 diver_left and H2 diver_left same name? H2 unit names can be same? h2_name_to_idx separate, but output rules reference H2 names. H2 add_h2_gate name can be same as H1? It doesn't matter, but to avoid confusion use h2_ prefix. H1 names: surface, six, sub_left, sub_right, sub_top, sub_bottom, sub_row8, enemy_left, enemy_right, enemy_top, enemy_bottom, diver_left, diver_right, diver_top, diver_bottom. H2 names: h2_surface_six etc.
+
+Need output rules reference H2 names.
+
+Potential issue: H1 threshold with many inputs and gain 10. If sum large (e.g., many enemies), z = 10*(sum - 0.5). tanh saturates +1. Good. For diver detector with +2/-1, if many divers/enemies, saturates. Good.
+
+Potential issue: sub_left and sub_right both true if sub_back spans halves. E.g., sub at col5 facing right: front col5 (right), back col4 (left). sub_left true, sub_right true. Then danger_left = enemy_left & sub_right true, danger_right = enemy_right & sub_left true. Could cause both left/right. But okay. Diver_left/right both true. Output may combine. Could use sub_front only? channel0 includes front/back. Could detect sub front? obs channel0 = sub_front | sub_back, cannot separate. Could use channel4 trail includes sub_back? channel4 = trail | sub_back. Not separate. So coarse.
+
+Potential issue: sub_top and sub_bottom both true if sub at row4? top rows0-4, bottom rows5-8, no overlap. If sub_back? same row. Good.
+
+Potential issue: surface detector row0 ch0. If sub at row1, back? same row1. no.
+
+Potential issue: six_divers detection may false negative if oxygen high. But likely okay. Could improve by using multiple gauge columns to detect count=6 independent of oxygen? Let's think. Diver gauge right-aligned length count. Oxygen left-aligned length oxygen_len. We have 32 H1, could create units for each possible count? Maybe detect count=6 by checking col3=1 and col8=1 and col4=1? Oxygen can also. But if oxygen high, all left cols 1. Need distinguish right-aligned block of length 6. Could detect col3=1 and col2=0 (low oxygen) as above. If oxygen high, can't. But when count=6, oxygen likely low. Could also detect count=6 by col3=1 and col9=0? Diver gauge never col9, oxygen gauge col9 if oxygen=200. If oxygen high 200, col9=1. Not.
+
+Maybe use diver_count gauge pattern: count=6 => cols3-8 =1, col9=0. count=5 => cols4-8=1, col3=0. If oxygen high, cols0-9 maybe all 1, so col3=1. Can't. But oxygen high only early; you won't have 6 divers early. So fine.
+
+Need maybe detect surface_six: surface & six. If six false negative, policy won't surface, oxygen depletes. Could add alternative six detection using low oxygen? Maybe if oxygen very low, surface? But terminal if not 6. Could risk. Maybe create six_divers as OR of gauge low-oxygen pattern and maybe count of divers on screen? Not.
+
+Could use H1 unit for gauge_col3 and gauge_col2 separately, H2 six = col3 & not col2. Same.
+
+Could use H1 unit for gauge_col4? count>=5? col4=1 if count>=5 or oxygen>=80? Not.
+
+Maybe use oxygen_low to force surface? If oxygen low and not six, terminal anyway. But maybe better to surface than die? If not six, surface terminal. No reward. But maybe if six false negative, surface terminal; if not surface, oxygen terminal. Same.
+
+Need maybe collect divers: diver detectors use ch2-ch1 half. If diver in same half as sub, no direction. Default down. Could get stuck. But maybe okay.
+
+Could improve with row/col exact using H1 coordinate extractors? We have 32 H1, could create sub_x_left/right, sub_y_top/bottom already. For diver direction, half enough.
+
+Could create H1 units for diver in same row? Need sub row. Could create for each row? 9 rows, too many but maybe. H1 32, we have 16, could add diver_row0..8? But H2 32, could use. But output limited. Maybe not.
+
+Alternative policy: Use channel2 (divers+enemies) to move toward nearest target half, channel1 to avoid. Good.
+
+Need consider action 5 fire. Could add fire when enemy in same horizontal half and sub facing? We don't know orientation. But firing can kill enemies in line. Maybe add fire condition: enemy_left & sub_right? But danger_left already moves right. Firing left could kill enemy but if orientation not left, bullet goes right. Could be bad. Maybe fire when enemy in same row and in front? Need orientation. Could infer orientation from sub_back? channel0 includes front/back, channel4 includes trail|sub_back. If sub_back is left of front, orientation right? Let's see: sub_or True (facing right) => back_x = sub_x -1 (left). sub_or False (facing left) => back_x = sub_x +1 (right). So if sub_back is left, facing right; if back right, facing left. Obs channel4 includes sub_back (and trails). channel0 includes both. Could detect orientation? Need exact sub front and back. Hard. But maybe H1 units for sub_back_left? channel4? channel4 = trail | sub_back. Trails from enemies/divers also. Not pure.
+
+Skip fire.
+
+Need ensure code uses MLPProgram and MLPCompilerBackend. The final code block should define build_policy(). It may assume these names are in global namespace. Could include from .ir import MLPProgram? The prompt says use following IR and backend. In many tasks, they expect just function using provided classes. If we include imports, might fail if relative. Better not import. But if code executed in environment where MLPProgram and MLPCompilerBackend are defined, okay. The backend code includes from .ir import MLPProgram, but our function can reference MLPProgram. If not, maybe need import? The instruction: "Use the following NeuralCompiler IR and backend to build a policy. Return one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program)." So likely they will prepend IR/backend. So no imports.
+
+Need ensure no testing, no forward pass. Our code only constructs program.
+
+Need maybe include type hints? fine.
+
+Let's draft code:
+
+def build_policy():
+    def idx(r,c,ch): return (r*10+c)*6+ch
+    prog = MLPProgram(input_dim=600, h1_dim=32, h2_dim=32, output_dim=6, activation="tanh")
+
+    def add_positive_detector(name, weights):
+         # weights dict idx->weight, threshold 0.5
+         prog.add_h1_threshold(name, weights, threshold=0.5, gain=10.0)
+
+    # surface
+    w = {idx(r,c,0):1.0 for r in [0] for c in range(10)}
+    prog.add_h1_threshold("surface", w, 0.5, 10.0)
+    # six
+    w = {idx(9,3,5):1.0, idx(9,2,5):-1.0}
+    prog.add_h1_threshold("six", w, 0.5, 10.0)
+    # sub_left
+    w = {idx(r,c,0):1.0 for r in range(9) for c in range(5)}
+    prog.add_h1_threshold("sub_left", w, 0.5, 10.0)
+    # sub_right
+    w = {idx(r,c,0):1.0 for r in range(9) for c in range(5,10)}
+    ...
+    # sub_top rows0-4
+    # sub_bottom rows5-8
+    # sub_row8
+    # enemy_left etc
+    # diver detectors: for each cell in region, add +2 ch2, -1 ch1. Need combine if same idx? ch different so no.
+    def add_diver_detector(name, rows, cols):
+       w={}
+       for r in rows:
+         for c in cols:
+           w[idx(r,c,2)] = w.get(...)+2.0
+           w[idx(r,c,1)] = w.get(...)-1.0
+       prog.add_h1_threshold(name,w,0.5,10.0)
+
+Rows range(9) for y0-8. For top rows range(5), bottom range(5,9).
+
+H2:
+    def and2(a,b): prog.add_h2_gate(name, {a:10.0,b:10.0}, bias=-15.0)
+    def and_not(a,b): {a:10,b:-10}, bias=-15
+    def pass1(a): {a:10}, bias=0
+
+    prog.add_h2_gate("h2_surface_six", {"surface":10.0,"six":10.0}, -15.0)
+    prog.add_h2_gate("h2_surface_not_six", {"surface":10.0,"six":-10.0}, -15.0)
+    prog.add_h2_gate("h2_six_not_surface", {"six":10.0,"surface":-10.0}, -15.0)
+    prog.add_h2_gate("h2_danger_left", {"enemy_left":10.0,"sub_right":10.0}, -15.0)
+    ...
+    prog.add_h2_gate("h2_bottom", {"sub_row8":10.0}, 0.0)
+    prog.add_h2_gate("h2_default_down", {"surface":-10.0,"sub_row8":-10.0}, -15.0)
+
+Check h2_default_down: if surface false (-1), bottom false (-1): 10+10-15=5 true. If surface true (-? surface +1): -10+10-15=-15 false. If bottom true: 10-10-15=-15. Good.
+
+Output:
+    prog.output_bias = [0.0,0.0,0.0,0.0,0.0,0.0]
+    # action 0
+    terms = {"h2_surface_six":50.0}
+    prog.set_output_action(0, terms, bias=sum(terms.values()) + 0.0)
+    # action1
+    terms = {"h2_danger_right":30.0, "h2_diver_left":20.0}
+    bias=sum +0
+    # action2
+    terms = {"h2_six_not_surface":40.0, "h2_danger_bottom":30.0, "h2_diver_up":20.0, "h2_bottom":40.0}
+    bias=sum +0
+    # action3
+    terms = {"h2_danger_left":30.0, "h2_diver_right":20.0}
+    # action4
+    terms = {"h2_surface_not_six":50.0, "h2_danger_top":30.0, "h2_diver_down":20.0, "h2_default_down":5.0}
+    bias=sum + 10.0
+    # action5 maybe fire: terms {} bias 0? set_output_action(5, {}, bias=0.0)
+    return MLPCompilerBackend.compile(prog)
+
+Need check output_bias: set_output_action sets b3[act_idx] = float(rule["bias"]) if "bias" in rule. It overwrites output_bias. We can just use bias in each rule. No need prog.output_bias. But if action5 no rule, b3[5] remains 0. Could set rule with empty terms bias 0. set_output_action allows empty h2_terms? It appends rule, loops none, sets bias. Good.
+
+Need ensure bias calculation: For action4, sum weights = 50+30+20+5=105, +10 =115. If all false, logit = 115 + (-105) =10. Good. If default_down true (+1) and others false: 115 -100 +5? Wait terms: surface_not_six false -50, danger_top false -30, diver_down false -20, default_down true +5 => total -95, +115 =20. Good. If surface_not_six true: +50 -30 -20 -5? default false? surface true => default false -5. total -5, +115=110. Good.
+Action2 bias sum=40+30+20+40=130. If all false: 0. If bottom true only: +40 -40 -30 -20 = -50? Wait terms: six false -40, danger_bottom false -30, diver_up false -20, bottom true +40 => -50, +130=80. Good. If six_not_surface true and default? up 80. If bottom true and six true: +40+40 -30 -20 =30, +130=160. Good.
+Action1 bias 50. If danger_right true: +30 -20=10+50=60. If diver_left true: -30+20=-10+50=40. If both: +30+20=50+50=100.
+Action3 similar.
+Action0 bias 50. If surface_six true: +50+50=100. false 0.
+
+Potential issue: H2 units false -1, true +1. But some H2 may be 0? With H1 +1/-1 and gates, outputs saturate ±1. Good.
+
+Need check H1 six with threshold 0.5 and weights +1/-1. If col3=1,col2=0 sum=1 => z=10*(0.5)=5 => +1. If col3=0,col2=0 sum=0 => z=-5 => -1. If col3=1,col2=1 sum=0 => -1. Good.
+
+Need check H1 diver detector with threshold 0.5, weights +2/-1. If no inputs sum=0 => -1. If one enemy sum=-1 => -15? z=10*(-1.5)=-15 => -1. If one diver sum=2 => 15 => +1. If diver+enemy sum=1 => 5 => +1. Good.
+
+Need check H1 positive detector with threshold 0.5. If no input sum=0 => -1. If one input sum=1 => +1. Good.
+
+Potential issue: H1 sub_left and sub_right both true if sub spans. Then h2_danger_left and danger_right may both true if enemies both halves. Output left/right both boosted. Could choose based on weights equal. Maybe okay.
+
+Potential issue: h2_diver_up = diver_top & sub_bottom. If diver_top true due to enemy top, and sub_bottom, may move up toward enemy. Danger_top = enemy_top & sub_bottom also true, weight 30 vs diver_up 20, down? Wait danger_top means enemy in top half, sub bottom => move down (away). h2_danger_top output down weight 30. h2_diver_up output up weight 20. Down wins. Good. If enemy_top false but diver_top true (diver), up. Good.
+
+Potential issue: h2_danger_left = enemy_left & sub_right => move right. If enemy_left true due to enemy bullet left, good. If sub_right false (sub left), no. If enemy in same half left, no danger, diver_left may move left into enemy if enemy also diver detector? But diver detector uses ch2-ch1, enemy only gives -1, so diver_left false if only enemy. Good. If enemy+diver in left half and sub left, diver_left may true if diver outweighs, move left. Danger_left false because sub_right false. Could be bad. But if enemy in same half, maybe unavoidable.
+
+Could add danger_same_left? enemy_left & sub_left => maybe move right? But if enemy left half and sub left, moving right may avoid. Could create h2_danger_left_same = enemy_left & sub_left? But then if enemy left and sub left, move right. However if diver left and sub left, diver_left true, conflict. Danger priority should avoid. We can add H2 danger_left_any = enemy_left (pass) maybe weight 30 to right? But if enemy left half and sub left, moving right away. If enemy left half and sub right, also moving right. So simply if enemy_left true, move right. Similarly enemy_right true move left, enemy_top true move down, enemy_bottom true move up. That may be better, no need sub half. But if enemy left half but sub left, moving right may move away; good. If enemy left half but sub right, moving right away; good. If enemy left half but sub at left edge, moving right. So use pass enemy_left => right, enemy_right => left, enemy_top => down, enemy_bottom => up. This avoids AND and false? H2 pass of H1 +1/-1. Output false penalties handled. This may be simpler and more robust. But if enemy in left half and diver in right half, right gets danger 30 + diver_right 20, good. If enemy in left half and diver left, right 30, left 20, right wins. Good. Let's replace danger H2 with pass enemy_left/right/top/bottom. But H1 enemy detectors are +1/-1. H2 pass {enemy_left:10}, bias 0 => +1 if enemy_left true, -1 if false. Good.
+
+Then H2 units:
+h2_danger_left = pass enemy_left
+h2_danger_right = pass enemy_right
+h2_danger_top = pass enemy_top
+h2_danger_bottom = pass enemy_bottom
+This uses 4 H2. No need sub half for danger. But if enemy in top half and sub top, moving down away; good. If enemy in bottom half and sub bottom, moving up; good.
+
+Could also use enemy presence to fire? no.
+
+H2 count still 13.
+
+Need maybe add h2_enemy_any? Not.
+
+Output weights: danger_left 30, danger_right 30, danger_top 30, danger_bottom 30.
+
+Potential issue: If enemy in left half and right half both, right and left both 60? Actually action right gets danger_left 30, action left gets danger_right 30. Tie. Could add small bias? Not.
+
+Could use sub half to choose away from enemy: if enemy_left and sub_left, right; if enemy_left and sub_right, right. So pass okay. If enemy_right and sub_right, left. Good.
+
+Need maybe avoid moving into enemy in same cell? Coarse.
+
+Could add H1 enemy_same_row? Not.
+
+Need maybe use friendly bullet channel3? Could fire if no friendly bullet? Not.
+
+Could add H1 shot_cooldown? channel3 friendly bullet presence. If no friendly bullet, fire maybe. But not.
+
+Need maybe use oxygen gauge to surface when low? Could add H1 oxygen_low and H2 low_oxygen => up? But if not six, terminal. Maybe if oxygen very low, surface to maybe have six? If six false negative, surface terminal. But if six true, surface. Could add low_oxygen & six? Already surface_six. If low oxygen and not six, maybe still surface? Terminal. No benefit.
+
+Need maybe collect divers: diver detectors half. If diver in same half as sub, default down. Could get stuck at bottom. bottom H2 up. If diver bottom and sub top, down. If diver top and sub bottom, up. If diver left and sub right, left. If diver right and sub left, right. If diver same half, no direction. Could use default down, maybe eventually change half. Okay.
+
+Could add H1 diver_present and H2 diver_present => fire? no.
+
+Need ensure architecture 600->32->32->6. We use 16 H1, 13 H2. Good.
+
+Need maybe use add_spatial_coord_extractor? Not necessary.
+
+Let's think about initial state. obs: sub at row0 col5, back? sub_or False => back_x=6. channel0 row0 col5,6. surface true. six false (row9 col3? oxygen 200 => col3=1, col2=1 => six false). enemy none, diver none. H1: surface +1, six -1, sub_left? cols0-4 none? back col6, front col5 => sub_left -1, sub_right +1, sub_top +1, sub_bottom -1, sub_row8 -1. enemy all -1, diver all -1. H2: surface_six false (surface +, six - => -5? -1), surface_not_six true (+1), six_not_surface false, dangers false, divers false, bottom false, default_down false (surface true). Output: no-op 0, left 0, up 0, right 0, down 110, fire 0. Chooses down. Good.
+
+After down, sub_y=1, surface false, six false, sub_top true, sub_bottom false, default_down true (surface false, bottom false). No enemies/divers. Output down base 20? Let's compute: action4 bias115, terms surface_not_six false -50, danger_top false -30, diver_down false -20, default_down true +5 => 20. Others 0. Chooses down. It will keep moving down to bottom. At bottom row8, sub_row8 true, default_down false, bottom true. Output up 80, down 10? action4 bias115 -50-30-20-5? default false -5 =>10. up wins. So it will bounce bottom/up? At row7, default down, moves down to row8. At row8, up to row7. It may oscillate, oxygen depletes. Need collect divers. Divers spawn every 30. Diver detector half may direct. If diver spawns in top half and sub bottom, up. If bottom half and sub top, down. If same half, default down/bottom up. It may eventually collect. But oscillation wastes oxygen. Maybe default should be toward diver if any, else maybe stay? But no-op at non-surface okay? It consumes oxygen. Any action consumes oxygen if y>0. No-op also consumes oxygen? act: if sub_y>0 oxygen -=1. So no-op same. Need move to divers.
+
+Could improve default: if diver_present, move toward diver half; if no diver, maybe move up to surface? But if not six, surface terminal. Maybe move to center? Hard.
+
+Could use diver_present H2 and default toward center? We have H1 diver_left/right/top/bottom. If diver in same half, maybe choose horizontal/vertical based on other half? For same half, no info. Could default to up? Since surface needed eventually, but if not six terminal. Maybe default down to bottom? Not.
+
+Could create H1 diver_present = any diver (ch2-ch1 all grid). H2 diver_present pass. Output maybe fire? Or move toward center? Could set default_down only if no diver_present; if diver_present but no direction, maybe no-op? But no-op wastes. Could move horizontally? Maybe choose left if diver_left? Already. If diver same half, maybe choose action based on sub half? For diver_left true and sub_left true, maybe move right? No, diver could be left or right within half. Could use sub_left/right to choose opposite? If diver_left and sub_left, maybe move right to change half? Not necessarily.
+
+Maybe use row/col exact with more H1 units. We have 16 H1, can add more. Let's consider using 32 H1 to detect sub row/col and diver row/col more precisely, enabling better policy. H2 32. Could design a simple greedy: find diver in same row, move horizontally toward it; else find diver in same column, move vertically; else move to center. But need exact sub position and diver position. With 32 H1, can create detectors for sub in each row? 9 rows, sub in each col? 10 cols, diver in each row/col? Too many. But maybe use coordinate extractors to compute sub_x and sub_y as analog values? H1 threshold units can output +1/-1, not analog. But H1 RAW could output linear coordinate? tanh saturates. Not good.
+
+Could create H1 units for sub_row0..8 (9) and sub_col0..9 (10) =19. Diver row/col? 19 more, total 38 >32. But maybe use half only.
+
+Could create H1 units for diver in each row (9) and sub in each row (9) =18, plus surface, six, enemy half =? 24. Then H2 can compare rows: if diver_row < sub_row move up, > move down. But need pairwise comparisons in H2: 9x9=81 too many. Could use analog row values? H1 threshold can create row index? Maybe use add_spatial_coord_extractor with col_weights to compute weighted sum of sub position, then threshold? But H1 output tanh, not value. However H2 can take H1 signals that are +1/-1 for row comparisons. Could create H1 units for sub_row_above_threshold for each k: sub_y < k. 8 units. Diver_row_above_threshold for each k: any diver y < k. 8 units. Then H2 can determine if diver above sub? Need compare distributions. If diver_top_k and sub_bottom_k? For each k, if diver in rows<k and sub in rows>=k, then diver above sub. OR over k. Could create H2 units for each k: diver_above_k = diver_row_lt_k & sub_row_ge_k. 8 H2. Then h2_diver_up = OR of these? H2 can't OR multiple H2, but output can sum weights from each k to up. Similarly diver_down. This could improve vertical direction. H1 count: sub_row_lt_k for k=1..8? sub_y < k. Since sub_y 0..8. Use ch0 rows0..k-1 sum >0. sub_row_ge_k = rows k..8 sum >0. But sub_row_ge_k is NOT sub_row_lt_k? Could create both or use H2 NOT. H1 16 for sub row comparisons. Diver_row_lt_k 8. Total 24. Plus surface, six, enemy half 4, diver half? maybe 30. H1 32. H2: 8 diver_above_k, 8 diver_below_k, surface_six, surface_not_six, six_not_surface, danger pass 4, bottom, default = 25. Fits 32. This could give vertical direction to any diver (or enemy? diver detector ch2-ch1). But horizontal direction still half.
+
+Could also do horizontal comparisons with col_lt_k, but H1 limit. Maybe vertical more important for oxygen? Need collect divers, horizontal too.
+
+Maybe use 32 H1 for row comparisons and half horizontal. Let's design more robust policy with row comparisons.
+
+H1 units:
+- surface (row0 ch0)
+- six (gauge)
+- sub_row8 (row8 ch0)
+- enemy_left, enemy_right, enemy_top, enemy_bottom (4)
+- diver_left, diver_right (2)
+- sub_row_lt_k for k=1..8? 8 units: any sub in rows 0..k-1. But surface is sub_row_lt_1. Could reuse surface for k=1. Need sub_row_ge_k? Could use H2 NOT of sub_row_lt_k. For diver_above_k: diver_row_lt_k & NOT sub_row_lt_k. Need H2 AND with NOT. H1 sub_row_lt_k +1/-1. H2 {diver_lt_k:10, sub_lt_k:-10}, bias -15. If diver above (diver_lt true, sub_lt false) => true. Good. For k=1, sub_lt_1 = surface. diver_lt_1 = diver row0. But divers spawn y1..8, no row0? Could be row0? spawn low=1 high=9, so no row0. But bullets? diver no. So k=1 not needed. Use k=2..8? If sub_y=0, sub_lt_k true for all k, so diver_above false. Good.
+- diver_row_lt_k for k=2..8? 7 units. Diver in rows 0..k-1. Since no row0, effectively rows1..k-1.
+Total H1: surface, six, sub_row8, enemy_left/right/top/bottom (4), diver_left/right (2), sub_lt_k k=2..8 (7) (surface covers k=1), diver_lt_k k=2..8 (7) = 1+1+1+4+2+7+7=23. Could add sub_lt_1? surface. Good. Could add sub_row_ge? not needed.
+Could add diver_present? maybe OR of diver_lt_8? diver_lt_8 rows0..7, misses row8. Need diver_row_lt_9? rows0..8 all. Could use diver_present = any diver all rows. Add H1 diver_present (1) =>24. Could add enemy_present? not.
+Could add sub_col_lt? maybe 5? We have 8 H1 left. Could add sub_col_left/right already? We have diver_left/right but not sub_left/right. For horizontal direction, need sub half. Add sub_left, sub_right (2) =>26. Could add sub_col_lt_k for k=1..9? 9 units too many. Maybe add sub_col_lt_5 (sub_left) and sub_col_ge_5 (sub_right) already. Good.
+Could add diver_col_lt_k? no.
+Could add oxygen_low? maybe.
+
+H2 units:
+- h2_surface_six, h2_surface_not_six, h2_six_not_surface (3)
+- h2_danger_left/right/top/bottom pass (4)
+- h2_diver_left = diver_left & sub_right? (1)
+- h2_diver_right = diver_right & sub_left? (1)
+- h2_diver_up_k for k=2..8: diver_lt_k & NOT sub_lt_k (7)
+- h2_diver_down_k for k=2..8: sub_lt_k & NOT diver_lt_k? Need if sub above diver: sub_y < k and diver_y >= k. For each k, if sub_lt_k true and diver_lt_k false, then there exists k such that sub < k <= diver? If sub_y < diver_y, choose k = sub_y+1 (if <=8). Then sub_lt_k true, diver_lt_k false. If sub_y >= diver_y, for all k? If sub_y=5, diver_y=3: k=4: sub_lt_4 false, diver_lt_4 true; no. k=6: sub_lt_6 true, diver_lt_6 true. So no k with sub true diver false? If sub_y=5, diver_y=8: k=6: sub true, diver false (diver_lt_6 false) => true. Good. So h2_diver_down_k = sub_lt_k & NOT diver_lt_k. 7 units.
+- h2_bottom pass sub_row8 (1)
+- h2_default_down = NOT surface & NOT bottom & NOT diver_present? Maybe if no diver, default down? Could use NOT surface & NOT bottom. But if diver present but no direction (same row/col?), default maybe down. We can create h2_default_down = NOT surface & NOT bottom (as before). (1)
+Total H2: 3+4+2+7+7+1+1=25. Fits.
+
+Output:
+Action up: six_not_surface 40, danger_bottom 30, diver_up_k weights? Sum 7 units. We can give each k weight 3? Total 21. But if multiple k true? For a given diver above sub, how many k true? Suppose sub_y=5, diver_y=2. diver_lt_k true for k>=3, sub_lt_k false for k<=5? For k=3,4,5: diver true, sub false => 3 units true. For k=6,7,8: sub true, diver true => false. So multiple true. If each weight 3, up boost 18. Good. For diver below, down multiple. We can set weight 5 each, total up to 35. Need priority: danger 30, diver direction maybe 20-30. If multiple k, could exceed danger. That's okay if diver direction strong. But if enemy danger and diver direction conflict, danger should win. If diver_up_k multiple sum 35 > danger_bottom 30, may move toward diver into enemy. Could cap by using smaller weight per k, e.g., 2 each, max 14, less than danger 30. But if no danger, diver direction should beat default. 14 > default 5. Good. Use weight 3 each max 21 < danger 30. Good.
+Action down: surface_not_six 50, danger_top 30, diver_down_k 3 each, default_down 5.
+Action left: danger_right 30, diver_left 20.
+Action right: danger_left 30, diver_right 20.
+Action up also bottom 40.
+Need bias = sum weights + base. For up: weights 40+30+40 + 7*3 = 131? 40+30+40=110, +21=131. base 0. If all false, 0. If one diver_up_k true (but usually multiple), boost 6? Wait true +1 vs false -1, boost 2*w =6 per unit. If 3 true, boost 18. Good. If bottom true, boost 80. If six true, boost 80.
+Down: 50+30+21+5=106 + base10 =116. All false base10. If 3 diver_down true boost18 =>28. Good.
+Left: 30+20=50.
+Right:50.
+No-op:50.
+Fire:0.
+
+Need H1 sub_lt_k and diver_lt_k. For k=2..8:
+sub_lt_k: rows 0..k-1 ch0 sum >0. But surface is row0. For k=2, rows0,1. If sub at row0 or1, true. Good.
+diver_lt_k: diver indicator rows0..k-1. Use +2 ch2 -1 ch1. threshold 0.5.
+Need sub_left/right: sub_left cols0-4, sub_right cols5-9.
+Diver_left/right: as before.
+Enemy_left/right/top/bottom: as before.
+Six, surface, sub_row8.
+H1 count: surface, six, sub_row8, sub_left, sub_right, enemy_left, enemy_right, enemy_top, enemy_bottom, diver_left, diver_right, sub_lt_2..8 (7), diver_lt_2..8 (7) = 1+1+1+2+4+2+7+7=25. Good. Could add diver_present? Not needed. Could add enemy_present? no.
+
+H2 count: surface_six, surface_not_six, six_not_surface, danger_left, danger_right, danger_top, danger_bottom, diver_left, diver_right, diver_up_2..8 (7), diver_down_2..8 (7), bottom, default_down = 3+4+2+14+1+1=25. Good.
+
+Need define H2 diver_up_k: {diver_lt_k:10, sub_lt_k:-10}, bias -15. For k=2, sub_lt_2 includes row0/1. If sub at row0, sub_lt true, so diver_up false (can't move up? at surface handled). If sub at row1, sub_lt_2 true, diver above? diver row0 none, so false. If sub at row2, sub_lt_2 false, diver row1 true for k=2 => true. Good.
+Diver_down_k: {sub_lt_k:10, diver_lt_k:-10}, bias -15. If sub row1, diver row2: k=2 sub_lt true, diver_lt false => true. Good.
+
+Need H2 diver_left: {diver_left:10, sub_right:10}, bias -15. If diver left half and sub right half => move left. If sub spans both, true. Diver_right similar.
+
+Need H2 default_down: {surface:-10, sub_row8:-10}, bias -15.
+
+Potential issue: H1 sub_lt_k true if sub_back in rows<k even if front not? sub_back same row, so okay.
+
+Potential issue: Diver_lt_k using ch2-ch1 may be true if diver in rows<k. If enemy+diver, okay. If only enemy, false. Good.
+
+This policy should move vertically toward any diver (or enemy? diver detector excludes enemy). If diver in same row, no vertical direction. Horizontal half may move if diver in opposite half. If diver same row and same half, default down/bottom up. Could still collect by oscillation? Maybe.
+
+Could add horizontal row comparisons using remaining H1? We have 7 H1 left (32-25). Could add sub_col_lt_k for k=1..7? and diver_col_lt_k? Need 14 for full. But maybe add sub_col_lt_5 (sub_left) already, sub_col_ge_5 (sub_right). Could add diver_col_lt_5 (diver_left) already. For same half, no. Could add sub_col_lt_2, sub_col_ge_2, sub_col_lt_8, sub_col_ge_8? 4 units. Diver_col_lt_2, diver_col_ge_2, diver_col_lt_8, diver_col_ge_8? 4 units. Total 8, one over. Could add 4: sub_col_lt_2, sub_col_ge_2, sub_col_lt_8, sub_col_ge_8. Then H2 horizontal direction: if diver left of sub? Need diver_col_lt_k & NOT sub_col_lt_k for left, and sub_col_lt_k & NOT diver_col_lt_k for right. But with only k=2,8 maybe coarse. Could add H2 for left/right using these. But H2 count 25, can add 4. H1 count 29. Let's consider.
+
+Add H1:
+- sub_col_lt_2: cols0-1 ch0
+- sub_col_ge_2: cols2-9 ch0? Could use NOT sub_col_lt_2 in H2, but H1 +1/-1 easier. Add sub_col_ge_2.
+- sub_col_lt_8: cols0-7
+- sub_col_ge_8: cols8-9
+But sub_left/right already cols0-4/5-9. Could use these for coarse. For finer, need diver_col_lt_2, diver_col_ge_2, diver_col_lt_8, diver_col_ge_8. That's 8 H1, total 33 if add all. We have 7 left. Could add 4 sub col and use diver_left/right? Not enough. Maybe add diver_col_lt_2 and diver_col_ge_2 only (2) plus sub_col_lt_2/ge_2 (2) =4, total 29. H2 add diver_left_fine = diver_col_lt_2 & NOT sub_col_lt_2? If diver in cols0-1 and sub col>=2 => move left. diver_right_fine = sub_col_lt_2 & NOT diver_col_lt_2? If sub col<2 and diver col>=2 => move right. Also for right edge: diver_col_ge_8 & NOT sub_col_ge_8 => move right? If diver cols8-9 and sub col<8 => move right. sub_col_ge_8 & NOT diver_col_ge_8 => move left. Need 4 H2. H2 count 29. Fits. H1 count 29. This improves horizontal when near edges. But maybe not necessary.
+
+Could instead use remaining H1 to add enemy adjacent? Hard.
+
+Maybe keep simpler 25 H1/25 H2 to reduce risk. But final answer can be more complex. Need ensure no mistakes. Simpler less chance of index errors. But policy quality maybe low. The task likely evaluates performance? It says design policy from scratch, no training. They may run it. Need maximize score. Need think of Seaquest known task. A good handcrafted policy can get high score. Need maybe implement known heuristics: collect divers, avoid enemies, shoot enemies in line, surface when 6. With 32 hidden units, can do more.
+
+Let's explore environment more to design better policy.
+
+Seaquest: 10x10, sub y 0..8, x 0..9. Oxygen 200. Need collect 6 divers, surface. Enemies spawn every e_spawn_speed (initial 20, ramps down to 1), move_speed initial 5, ramps down to 2? Ramping: if move_speed >2 and ramp_index%2: move_speed -=1; if e_spawn_speed>1: e_spawn_speed -=1; ramp_index +=1. So difficulty increases. Enemies: fish and subs. Fish move horizontally every move_speed steps, no shooting. Subs shoot every 10 steps. Enemy bullets horizontal. Friendly bullets horizontal, cooldown 5. Reward: +1 per enemy killed, + oxygen*10//200 when surface with 6 divers (max 10). Terminal: hit enemy/bullet/fish, oxygen 0, surface with 0 divers.
+
+Observation channels:
+0 sub (front/back)
+1 enemy (fish/sub/bullet)
+2 target (fish/sub/diver)
+3 friendly bullet
+4 trail (enemy/diver trail + sub_back)
+5 gauge (oxygen/diver count)
+
+A strong policy:
+- If at surface and 6 divers: no-op (or any) to surface, then down.
+- If at surface and <6: down.
+- If 6 divers and not surface: move up to surface.
+- Avoid enemies: if enemy in same row ahead? move away or shoot.
+- Collect divers: if diver in same row, move toward it; if not, move toward its row/col.
+- Shoot enemies in same row when facing them.
+- Manage oxygen: if low, prioritize surface if 6, else collect.
+
+With 32 units, can implement some.
+
+Need detect orientation to fire. Could infer orientation from sub_back position relative to sub_front. Obs channel0 has both, channel4 has sub_back (and trails). Could create H1 units for sub_back_left and sub_back_right? channel4 includes trail, but sub_back is in channel4. Trail also from enemies/divers. But maybe use channel4 to detect back. If sub_back left of front, orientation right. Need exact front? channel0 has front+back. Could detect sub_front? Not separate. But maybe channel0 and channel4: front is channel0 & ~channel4? Since channel4 includes sub_back, but also trails. If no trails, front = ch0 & ~ch4. But trails can interfere. Could use H1 linear: +ch0 -ch4 for a cell to detect front? If front only: ch0=1,ch4=0 =>1; back: ch0=1,ch4=1 =>0; trail: ch0=0,ch4=1 =>-1. Threshold 0.5. Could create H1 units for front in left/right? But need orientation: back left vs right. Could create H1 sub_back_left: channel4 cols0-4? But trails. Maybe okay.
+
+Fire policy: If enemy in same row and in front, fire. Need detect enemy in front left/right. Could use orientation and enemy half. If facing right (sub_back left), fire if enemy_right? But enemy_right half not same row. Could be okay. If facing left, fire if enemy_left. But moving away may be safer. Firing can kill enemies, reward. Cooldown 5. Could output fire when enemy in front half and no immediate danger? But if enemy in front, firing may kill; if not same row, bullet misses. Could still okay.
+
+Could add H1 facing_right: sub_back left? Use channel4 cols0-4? But sub_back at col x-1 if facing right. If sub at col0 facing right, back_x=-1? state: back_x = sub_x -1 if sub_or else sub_x+1. If sub_x=0 and sub_or True, back_x=-1, state[-1]? Wait state[back_x] with negative index? In Python, state[self.sub_y, back_x, 1] = 1 with back_x=-1 sets col9! That's a bug? Let's check: if sub_x=0, sub_or=True, back_x=-1, state[y,-1,1]=1 (col9). If sub_x=9, sub_or=False, back_x=10, state[y,10] out of bounds? Actually state shape 10, index 10 error? But maybe sub_or False at x=9? If move right from x=8 sets x=9, sub_or=True. If move left from x=1 sets x=0, sub_or=False, back_x=1. So back_x out of bounds only if facing right at x=0 or facing left at x=9. Can that happen? Initial x=5 facing left. If move left to x=0, facing left, back_x=1 ok. If then move right, x=1 facing right, back_x=0 ok. To be x=0 facing right, need move right from x=-1 impossible. To be x=9 facing left, need move left from x=10 impossible. So safe. Good.
+
+Orientation: facing right => back left (unless x=0 impossible). facing left => back right.
+
+Could detect facing_right by sub_back in left half? If sub at x=5 facing right, back x=4 left half. If sub at x=1 facing right, back x=0 left. If sub at x=9 facing right, back x=8 right half. So half not reliable. Could detect back left of front using pairwise? Hard.
+
+Maybe skip fire.
+
+Known Seaquest handcrafted policies often use simple rules: if enemy in same row, shoot; else if diver in same row, move toward; else move to center; surface when 6. But with limited units.
+
+Could use channel3 friendly bullet to avoid firing when bullet in flight. H1 friendly_bullet_present. If no friendly bullet and enemy in front, fire. But not.
+
+Need maybe use trail channel4 to detect enemy direction? Trail behind enemies. Channel4 = trail | sub_back. Trail indicates previous position of enemies/divers. Could infer movement direction: enemy with trail behind. But complex.
+
+Given no testing, a simple robust policy may be acceptable. But we want best possible.
+
+Let's consider using NeuralCompiler IR to implement a more exact greedy with 32 units. We can allocate H1 units to detect:
+- surface, six, sub_row8, sub_row1? 
+- sub_x_left/right, sub_y_top/bottom
+- enemy in 8 neighbor cells? Could use H1 units that detect enemy in a cell AND sub in adjacent cell? H1 linear cannot AND, but we can create H1 units for each possible sub position? For each neighbor direction, we can create a H1 unit with weights that are positive when enemy in target cell and sub in current cell? Linear sum cannot multiply, but if we assign weights to both inputs, it can detect OR, not AND. However if we use threshold high enough requiring both? For binary inputs, sum of two weights can threshold to require both if weights positive and threshold > one weight. Example enemy cell weight 10, sub cell weight 10, threshold 15 => true only if both 1 (sum20), false if one (10). This is an AND detector in H1! Yes! H1 can AND two input features by positive weights and threshold. Great. We can create H1 units for enemy adjacent left/right/up/down relative to sub by summing enemy at neighbor cell and sub at current cell? But sub position variable; need for all possible sub positions. For enemy left of sub: for each cell (r,c) as sub, enemy at (r,c-1). We can add weights +10 to sub cell (r,c) ch0 and +10 to enemy cell (r,c-1) ch1, threshold 15. If both present, sum20 => true; if only one, 10 => false. This detects any enemy immediately left of sub. Similarly right, up, down. That's 4 H1 units! Very useful. Also detect diver adjacent? For collection, diver in same cell? If diver at sub cell, terminal? Actually if diver at sub cell, collected. Need detect diver adjacent to move into. Could create H1 units for diver left/right/up/down using sub cell ch0 and diver indicator at neighbor. But diver indicator is ch2-ch1, not single input. We can use weights +10 to sub ch0, +20 to neighbor ch2, -10 to neighbor ch1? Need threshold to require sub and diver (ch2 without ch1). If sub=1, diver=1 (ch2=1,ch1=0): sum 10+20=30. If sub=1, enemy=1 (ch2=1,ch1=1): sum 10+20-10=20. If threshold 25, enemy false, diver true. If no sub, diver: 20 <25 false. Good. So H1 AND detectors for diver adjacent left/right/up/down. 4 units. Enemy adjacent 4 units. Total 8.
+
+Also detect enemy in same row ahead? Could create for each row? Maybe adjacent enough for avoidance. Fire if enemy adjacent in front? Need orientation. Could detect enemy left/right adjacent and maybe fire? If enemy left adjacent, moving left would collide, moving right away. Firing left could kill if facing left. But orientation unknown. Could move away.
+
+Detect diver adjacent: if diver left, move left; right move right; up move up; down move down. This is strong.
+
+Detect enemy adjacent: if enemy left, move right; right move left; up move down; down move up. Priority over diver.
+
+This uses H1 units with many weights (for all sub positions). Need ensure threshold works with multiple matches. If multiple enemy adjacent, sum > threshold true. Good.
+
+H1 units:
+- enemy_adj_left: for r 0..8, c 1..9: sub at (r,c) ch0 weight 10, enemy at (r,c-1) ch1 weight 10. threshold 15, gain 10? Wait THRESHOLD multiplies weights by gain and bias -gain*threshold. If we set weights 10, threshold 15, gain 10 => z=10*(10*sum? Actually input_weights values are multiplied by gain. If weight 10, gain 10 => effective 100. threshold 15 => bias -150. If both: 200-150=50 true; one:100-150=-50 false. Good. But weights can be 1, threshold 1.5 simpler. Use weight 1 for sub and enemy, threshold 1.5, gain 10. Both sum2 => 10*(0.5)=5 true; one sum1 => -5 false. Good. For diver adjacent with ch2/ch1: use sub weight 1, neighbor ch2 weight 2, neighbor ch1 weight -1, threshold 2.5? Let's compute: sub+diver: 1+2=3 => 3-2.5=0.5 true. sub+enemy:1+2-1=2 => -0.5 false. no sub diver:2 => -0.5 false. no sub enemy:1 => -1.5 false. Good. Use threshold 2.5, gain 10.
+But if multiple sub? only one. If multiple diver adjacent, sum larger true.
+
+Need be careful: sub channel0 includes sub_back. For enemy adjacent to sub_back? If enemy adjacent to back cell, detector may true even if not adjacent to front. But sub occupies front and back? Actually sub is one cell, back is visual only. Using ch0 includes back, could false. But maybe okay. Could use channel0 as sub presence. If enemy adjacent to back, likely near sub. Good.
+
+For diver adjacent, using ch0 includes back, may detect diver adjacent to back. okay.
+
+H1 count now: surface, six, sub_row8, enemy_adj_left/right/up/down (4), diver_adj_left/right/up/down (4), maybe enemy half (4), diver half (2), sub half (2), row comparisons? We have 32. Let's allocate:
+1 surface
+2 six
+3 sub_row8
+4 enemy_adj_left
+5 enemy_adj_right
+6 enemy_adj_up
+7 enemy_adj_down
+8 diver_adj_left
+9 diver_adj_right
+10 diver_adj_up
+11 diver_adj_down
+12 enemy_left
+13 enemy_right
+14 enemy_top
+15 enemy_bottom
+16 diver_left
+17 diver_right
+18 sub_left
+19 sub_right
+20 sub_top
+21 sub_bottom
+22 sub_lt_2? maybe
+...
+We can include row comparisons for vertical non-adjacent. But adjacent detectors may suffice? Divers move horizontally, so if not same row, need vertical. Row comparisons useful.
+
+Maybe use H1 for sub_row_lt_k and diver_row_lt_k (14) plus adjacent (8) plus surface/six/sub_row8 (3) =25. Add enemy half (4) =29, diver half (2)=31, sub half (2)=33 too many. Could drop sub half? For horizontal adjacent, no need sub half. For non-adjacent horizontal, diver_left/right need sub_right/left. Could use sub_left/right. Need 2. Total 33. Drop enemy_top/bottom? Use enemy_adj for immediate, enemy_left/right for half. Maybe enemy_top/bottom not needed if row comparisons? Danger vertical can use enemy_adj_up/down and enemy_top/bottom? Could drop enemy_top/bottom, use enemy_adj_up/down only. But enemy in top half not adjacent may be dangerous. Could use enemy_top/bottom instead of half? Let's prioritize.
+
+H1 plan A (adjacent + row comparisons + half horizontal):
+- surface, six, sub_row8 (3)
+- enemy_adj_left/right/up/down (4)
+- diver_adj_left/right/up/down (4)
+- enemy_left, enemy_right (2) (horizontal half danger)
+- enemy_top, enemy_bottom (2) (vertical half danger)
+- diver_left, diver_right (2)
+- sub_left, sub_right (2)
+- sub_lt_k k=2..8 (7)
+- diver_lt_k k=2..8 (7)
+Total 3+4+4+2+2+2+2+7+7=33. One over. Could drop sub_row8? Need bottom avoid. Could infer bottom from sub_lt_8? sub_lt_8 true if sub rows0-7, false if row8. So sub_row8 = NOT sub_lt_8. We can use H2 NOT sub_lt_8 for bottom. So drop sub_row8 H1. Total 32. Great. Use sub_lt_8 as H1. H2 bottom = NOT sub_lt_8? H2 {sub_lt_8:-10}, bias 5? If sub_lt_8 false (-1) => 10+5=15 true; if true (+1) => -10+5=-5 false. Good. Or use H1 sub_row8? We can drop.
+
+H1 list 32:
+1 surface
+2 six
+3 enemy_adj_left
+4 enemy_adj_right
+5 enemy_adj_up
+6 enemy_adj_down
+7 diver_adj_left
+8 diver_adj_right
+9 diver_adj_up
+10 diver_adj_down
+11 enemy_left
+12 enemy_right
+13 enemy_top
+14 enemy_bottom
+15 diver_left
+16 diver_right
+17 sub_left
+18 sub_right
+19 sub_lt_2
+20 sub_lt_3
+21 sub_lt_4
+22 sub_lt_5
+23 sub_lt_6
+24 sub_lt_7
+25 sub_lt_8
+26 diver_lt_2
+27 diver_lt_2? Wait need 7: diver_lt_2..8 = 7 units, total 25+7=32. Yes.
+No sub_top/bottom; can use sub_lt_5 for top? sub_top = sub_lt_5 (rows0-4). sub_bottom = NOT sub_lt_5? rows5-8. H2 can use. Good.
+
+H2 units (32):
+- h2_surface_six (1)
+- h2_surface_not_six (2)
+- h2_six_not_surface (3)
+- h2_bottom = NOT sub_lt_8 (4)
+- h2_danger_adj_left = pass enemy_adj_left (5)
+- h2_danger_adj_right (6)
+- h2_danger_adj_up (7)
+- h2_danger_adj_down (8)
+- h2_danger_left = pass enemy_left (9)
+- h2_danger_right = pass enemy_right (10)
+- h2_danger_top = pass enemy_top (11)
+- h2_danger_bottom = pass enemy_bottom (12)
+- h2_diver_adj_left = pass diver_adj_left (13)
+- h2_diver_adj_right (14)
+- h2_diver_adj_up (15)
+- h2_diver_adj_down (16)
+- h2_diver_left = diver_left & sub_right (17)
+- h2_diver_right = diver_right & sub_left (18)
+- h2_diver_up_k for k=2..8 (7) => 19-25
+- h2_diver_down_k for k=2..8 (7) => 26-32
+Total 32 exactly. No default_down H2. We can use output bias base for down. But if no conditions, down base 10. Good. Need maybe default down not penalized by false H2? We'll use bias cancellation.
+
+Output weights:
+Action 0 no-op: h2_surface_six 50. bias 50.
+Action 1 left: h2_danger_adj_right 40, h2_danger_right 25, h2_diver_adj_left 30, h2_diver_left 15. bias sum=110.
+Action 2 up: h2_six_not_surface 50, h2_danger_adj_down 40, h2_danger_bottom 25, h2_diver_adj_up 30, h2_diver_up_k (7*3=21), h2_bottom 40. bias sum=50+40+25+30+21+40=206.
+Action 3 right: h2_danger_adj_left 40, h2_danger_left 25, h2_diver_adj_right 30, h2_diver_right 15. bias=110.
+Action 4 down: h2_surface_not_six 50, h2_danger_adj_up 40, h2_danger_top 25, h2_diver_adj_down 30, h2_diver_down_k (7*3=21). bias sum=166 + base_down 10 =176.
+Action 5 fire: maybe h2_danger_adj_left? Could add fire if enemy adjacent in front? But no orientation. Maybe skip, bias 0.
+But if enemy_adj_left true, action right gets 80 (boost 2*40) plus maybe danger_left. Good. If enemy_adj_right true, left. If enemy_adj_up true, down. If enemy_adj_down true, up.
+If diver_adj_left true, left boost 60, but if enemy_adj_right also true, left gets danger 80 + diver 60 =140, right? enemy_adj_left false. Good.
+If diver_adj_left and enemy_adj_left both true (enemy and diver same cell? impossible? enemy and diver can't same? maybe), right gets 80, left 60, right wins.
+If diver_up_k multiple true, up boost 6*3 per unit? Actually weight 3, true vs false boost 6. If 3 true, 18. Diver_adj_up weight 30 boost 60, strong.
+If six_not_surface true, up boost 100, dominates.
+If surface_not_six true, down boost 100.
+If bottom true, up boost 80. If at bottom and diver_adj_down true (diver below impossible), down boost 60, up 80, up wins. If at bottom and six_not_surface true, up 180.
+If no conditions, logits: no-op 0, left 0, up 0, right 0, down 10, fire 0. Chooses down. At bottom, bottom true => up 80, down 10, up. Good.
+
+Need ensure H2 pass units for H1 +1/-1: add_h2_gate(name, {h1:10.0}, bias=0.0). If H1 true +1 => tanh(10)=+1; false -1 => -1. Good.
+H2 AND for diver_left: {diver_left:10, sub_right:10}, bias -15. If both true => +1; if one true one false => -1; if both false => -1. Good.
+H2 diver_up_k: {diver_lt_k:10, sub_lt_k:-10}, bias -15. If diver_lt true, sub_lt false => +1. If both true or both false => -1. Good.
+H2 diver_down_k: {sub_lt_k:10, diver_lt_k:-10}, bias -15.
+H2 bottom: {sub_lt_8:-10}, bias 5. If sub_lt_8 false (-1) => 10+5=15 +; true (+1) => -10+5=-5 -. Good.
+H2 surface_six etc as before.
+
+Need H1 adjacent detectors construction carefully.
+
+Helper idx(r,c,ch).
+For enemy_adj_left: enemy at (r,c-1), sub at (r,c). For r in 0..8, c in 1..9. weights[idx(r,c,0)] +=1, weights[idx(r,c-1,1)] +=1. threshold 1.5, gain 10.
+But if sub at (r,c) and enemy at (r,c-1), sum 2. If sub_back also at (r,c-1)? channel0 includes back, but enemy ch1 separate. If enemy at back cell, sum includes sub ch0 at back? Wait sub ch0 at back cell also 1. For enemy_adj_left, we add sub weight at (r,c) for all c. If enemy at (r,c-1), and sub_back at (r,c-1) (if sub at c facing right? back left), then input ch0 at enemy cell also 1, but we didn't add weight to ch0 at (r,c-1) except as sub for c-1? For c-1, sub weight at (r,c-1) and enemy at (r,c-2). Not. So sum for enemy at back cell: enemy ch1 weight 1 (from c), sub ch0 at c weight 1, plus maybe sub ch0 at c-1 not weighted. Sum 2, true. Good, enemy adjacent to back considered.
+If enemy at (r,c-1) but no sub at c, sum 1 false. Good.
+If sub at c but no enemy, sum1 false.
+If multiple, true.
+
+enemy_adj_right: enemy at (r,c+1), sub at (r,c). c 0..8.
+enemy_adj_up: enemy at (r-1,c), sub at (r,c). r 1..8.
+enemy_adj_down: enemy at (r+1,c), sub at (r,c). r 0..7.
+
+Diver adjacent detectors: Need diver indicator at neighbor: ch2=1, ch1=0. Use weights: sub cell ch0 +1, neighbor ch2 +2, neighbor ch1 -1, threshold 2.5. Let's test if neighbor has diver and enemy? Can't both? Maybe enemy and diver same cell? state channels separate, could diver and enemy same cell? Possibly if spawn same cell? _spawn_enemy checks only e_subs+e_fish, not divers. Diver and enemy can same cell. If diver+enemy: ch2=1,ch1=1, sum sub1+2-1=2 <2.5 false. Good, treat as enemy not diver. If enemy only: sum1+2? ch2=0? enemy fish/sub has ch2=1 and ch1=1. Wait obs channel2 includes enemy fish|enemy sub|diver. So enemy has ch2=1 and ch1=1. Diver has ch2=1,ch1=0. So for enemy neighbor: ch2=1,ch1=1 => sum 1+2-1=2 false. For diver: 1+2-0=3 true. Good. If no sub, diver: 2 false. If no sub, enemy:1 false. Good.
+If multiple diver adjacent, sum > threshold true.
+If sub cell also has enemy? terminal maybe. Not.
+
+Need ensure threshold with gain 10: z=10*(sum - 2.5). Diver sum3 =>5 true; enemy sum2 => -5 false. Good.
+
+H1 half detectors:
+enemy_left: ch1 cols0-4 rows0-8 sum >0 threshold 0.5.
+enemy_right: cols5-9.
+enemy_top: rows0-4 all cols ch1.
+enemy_bottom: rows5-8 all cols ch1.
+diver_left: for rows0-8 cols0-4: +2 ch2, -1 ch1 threshold 0.5.
+diver_right: cols5-9.
+sub_left: ch0 cols0-4 rows0-8 threshold 0.5.
+sub_right: cols5-9.
+sub_lt_k: rows0..k-1 all cols ch0 threshold 0.5. For k=2..8. Note surface is sub_lt_1, but we have surface separate. sub_lt_2 includes row0/1.
+diver_lt_k: rows0..k-1 all cols diver indicator +2 ch2 -1 ch1 threshold 0.5. For k=2..8.
+
+H1 count check: surface 1, six 1, enemy_adj 4, diver_adj 4, enemy_left/right/top/bottom 4, diver_left/right 2, sub_left/right 2, sub_lt 7, diver_lt 7 = 32. Yes.
+
+Need maybe six detector: row9 col3 +1, col2 -1 threshold 0.5. But if oxygen low and count=6 true. If count=6 and oxygen high false. Could maybe use col3 +1, col2 -1, col4? If count=6, col4=1; count=5 col4=1 too. Not. Could use col3 +2, col2 -1, col4 -1? count6 low: col3=1,col2=0,col4=1 =>2-0-1=1 true; count5 low: col3=0,col2=0,col4=1 => -1 false; count6 high: col3=1,col2=1,col4=1 =>2-1-1=0 false (threshold 0.5 false). Good. If oxygen high count5: col3=1,col2=1,col4=1 =>0 false. If oxygen medium count6? col3=1,col2=1? if oxygen_len>=3, col2=1, col4=1 =>0 false. So still false high. But maybe better. Use weights {col3:2, col2:-1, col4:-1}, threshold 0.5. If count6 low (oxygen_len<=2): col3=1,col2=0,col4=1 =>1 true. If count6 and oxygen_len=3 (col2=1,col3=1,col4=1): 0 false. If count5 low: col3=0,col2=0,col4=1 => -1 false. If count5 high: col3=1,col2=1,col4=1 =>0 false. Good. Could use col5? count6 col5=1, count5 col5=1. no.
+Maybe use col3 +1, col2 -1, col4 -1? count6 low:1-0-1=0 false. So need +2.
+Use six weights: idx(9,3,5):2.0, idx(9,2,5):-1.0, idx(9,4,5):-1.0, threshold 0.5. If count6 low true. If count6 and oxygen_len=2 (cols0-1), col2=0,col3=1,col4=1 =>1. If oxygen_len=3 (cols0-2), col2=1 =>0 false. Oxygen when 6 divers likely <=50 => len2, true. Good.
+
+Could detect six by col3=1 and col2=0 and col4=1. Good.
+
+Need maybe surface detector: row0 ch0 sum >0. If sub at row0, true. If sub_back at row0? same.
+
+H2 count exactly 32. Need ensure names unique. Let's list H2 names:
+1 h2_surface_six
+2 h2_surface_not_six
+3 h2_six_not_surface
+4 h2_bottom
+5 h2_danger_adj_left
+6 h2_danger_adj_right
+7 h2_danger_adj_up
+8 h2_danger_adj_down
+9 h2_danger_left
+10 h2_danger_right
+11 h2_danger_top
+12 h2_danger_bottom
+13 h2_diver_adj_left
+14 h2_diver_adj_right
+15 h2_diver_adj_up
+16 h2_diver_adj_down
+17 h2_diver_left
+18 h2_diver_right
+19 h2_diver_up_2
+20 h2_diver_up_3
+21 h2_diver_up_4
+22 h2_diver_up_5
+23 h2_diver_up_6
+24 h2_diver_up_7
+25 h2_diver_up_8
+26 h2_diver_down_2
+27 h2_diver_down_3
+28 h2_diver_down_4
+29 h2_diver_down_5
+30 h2_diver_down_6
+31 h2_diver_down_7
+32 h2_diver_down_8
+Exactly 32. Good.
+
+Output rules reference these. Need ensure all H2 names exist.
+
+Output weights and biases:
+Action 0: terms {h2_surface_six:50}; bias 50.
+Action 1: terms {h2_danger_adj_right:40, h2_danger_right:25, h2_diver_adj_left:30, h2_diver_left:15}; bias 110.
+Action 2: terms {h2_six_not_surface:50, h2_danger_adj_down:40, h2_danger_bottom:25, h2_diver_adj_up:30, h2_bottom:40, h2_diver_up_2:3, ..., h2_diver_up_8:3}; bias = 50+40+25+30+40 + 7*3 = 206.
+Action 3: terms {h2_danger_adj_left:40, h2_danger_left:25, h2_diver_adj_right:30, h2_diver_right:15}; bias 110.
+Action 4: terms {h2_surface_not_six:50, h2_danger_adj_up:40, h2_danger_top:25, h2_diver_adj_down:30, h2_diver_down_2:3, ..., h2_diver_down_8:3}; bias = 50+40+25+30 +21 =166 + base_down 10 =176.
+Action 5: terms {} bias 0. Could add fire? Maybe add small fire when enemy_adj_left/right and no? But no orientation. Could add fire if enemy_adj_left or right? If fire, bullet in orientation. If enemy adjacent left but facing right, fire right misses. Could be bad. Skip.
+
+But if enemy_adj_left true, action right boost 80. If enemy_adj_right true, left. If enemy_adj_up true, down. If enemy_adj_down true, up. Good.
+
+Potential issue: If enemy_adj_left and enemy_adj_right both true (enemies both sides), right and left both 80, tie. Could add bias? Maybe no.
+
+Potential issue: If enemy_adj_up true and six_not_surface true, up gets 100 (six) +? danger_adj_up is down 80, so up wins. Good, surface priority.
+If surface_six true and enemy_adj_down true, no-op 100, up 80, no-op wins. Good.
+If surface_not_six true and enemy_adj_up true, down 100+80=180, up? danger_adj_down false, bottom? no. down wins. Good.
+
+Potential issue: At surface with six, h2_bottom false, h2_six_not_surface false (surface true), h2_surface_six true. no-op. Good.
+After surface reset, surface true, six false, h2_surface_not_six true, down 100. But 10% repeat no-op terminal. Accept.
+
+Potential issue: If six true and not surface, h2_six_not_surface true, up 100. But if enemy_adj_down true, up also 80, down 80. up wins. Good. If bottom true, up 180.
+
+Potential issue: Diver vertical direction using diver_lt_k and sub_lt_k. If diver and sub same row, no up/down. If diver above, multiple up_k true. If diver below, multiple down_k true. Let's test sub_y=4, diver_y=2. sub_lt_k: k=2 false? rows0-1, sub row4 false. k=3 false, k=4 false, k=5 true, k=6 true, k=7 true, k=8 true. diver_lt_k: k=2 false (rows0-1, diver row2 false), k=3 true (rows0-2), k=4 true, k=5 true, k=6 true, k=7 true, k=8 true. diver_up_k true when diver true, sub false: k=3,4 => 2 true. Good. diver_down_k true when sub true, diver false: none (for k=5-8 both true; k=2 both false). Good.
+Sub_y=2, diver_y=4. sub_lt: k=2 false? rows0-1, sub row2 false; k=3 true; k=4 true; ... diver_lt: k=2 false, k=3 false? rows0-2, diver row4 false; k=4 false? rows0-3 false; k=5 true; ... diver_down_k true when sub true, diver false: k=3,4 =>2. Good.
+Sub_y=0, diver_y=4. sub_lt all true (k>=2), diver_lt k=2,3 false, k=5+ true. diver_down_k true k=2,3? sub true, diver false =>2. Good. But surface priority down if not six. If six, up? diver above none.
+Sub_y=8, diver_y=4. sub_lt k=2..8? rows0..k-1. For k=8, rows0-7, sub row8 false. diver_lt k=5..8 true. diver_up_k true k=5,6,7? diver true, sub false for k=5,6,7? sub_lt_5 false? sub row8 false for all k<=8, yes. diver true for k>=5. So 3 true. Good.
+
+Diver horizontal half: diver_left & sub_right. If diver in left half, sub right half, move left. If sub spans, maybe. If diver same half, no. Adjacent diver detectors handle if adjacent. If diver same row but not adjacent and same half, no horizontal. Could default down. Maybe okay.
+
+Could use sub_left/right and diver_left/right to also move horizontally if diver in opposite half. Good.
+
+Need maybe use enemy half danger: enemy_left pass => right. If enemy in left half, move right. If enemy in right half, left. If enemy top, down. If enemy bottom, up. This may conflict with diver direction. Danger weights: adj 40, half 25. Diver adj 30, half 15, vertical k 3 each. So danger half 25 > diver vertical max 21, but diver adj 30 > danger half 25. If diver adjacent and enemy half opposite, may move toward diver into enemy half. But adjacent diver likely safe? Could be enemy also. Maybe okay. Could increase danger half to 30 and diver adj to 25? But adjacent diver important. Let's set danger_adj 40, danger_half 30, diver_adj 25, diver_half 15, vertical 3. Then danger half > diver vertical, but diver_adj > danger_half? 25 <30, so danger half wins over diver_adj. Maybe safer. But collecting divers important. If enemy in half, moving away may avoid. Let's choose:
+Action left: danger_adj_right 40, danger_right 30, diver_adj_left 25, diver_left 15. bias 110.
+Action right: danger_adj_left 40, danger_left 30, diver_adj_right 25, diver_right 15. bias 110.
+Action up: six 50, danger_adj_down 40, danger_bottom 30, diver_adj_up 25, bottom 40, up_k 3*7=21. bias 216? 50+40+30+25+40+21=206? Wait 50+40=90, +30=120, +25=145, +40=185, +21=206. Same as before if danger_bottom 30 (was 25) and diver_adj_up 25 (was30) sum same 206. Good.
+Action down: surface_not_six 50, danger_adj_up 40, danger_top 30, diver_adj_down 25, down_k 21. sum166 +10=176.
+This makes danger half 30, diver adj 25. Good.
+
+Need maybe fire? Could add action5 terms {h2_danger_adj_left:10, h2_danger_adj_right:10, h2_danger_adj_up:10, h2_danger_adj_down:10}? But if enemy adjacent, firing may be good if facing. But if not, could waste. Also fire doesn't move, enemy may hit. Movement away safer. Skip.
+
+Could add no-op when no diver and oxygen low? No.
+
+Need ensure H1 adjacent detectors don't exceed h1_dim. We'll add exactly 32. Need code carefully to avoid duplicate names. Use loops.
+
+Let's write code in final. Need maybe include comments. Ensure no syntax errors.
+
+Pseudo:
+
+def build_policy():
+    def idx(r,c,ch):
+        return (r*10 + c)*6 + ch
+
+    prog = MLPProgram(input_dim=600, h1_dim=32, h2_dim=32, output_dim=6, activation="tanh")
+
+    # surface
+    w = {idx(0,c,0):1.0 for c in range(10)}
+    prog.add_h1_threshold("surface", w, 0.5, 10.0)
+
+    # six
+    w = {idx(9,3,5):2.0, idx(9,2,5):-1.0, idx(9,4,5):-1.0}
+    prog.add_h1_threshold("six", w, 0.5, 10.0)
+
+    # enemy adjacent
+    def add_enemy_adj(name, dr, dc):
+       w={}
+       for r in range(10):
+         for c in range(10):
+           nr, nc = r+dr, c+dc
+           if 0 <= nr < 10 and 0 <= nc < 10:
+             # sub at r,c, enemy at nr,nc
+             w[idx(r,c,0)] = w.get(idx(r,c,0),0.0)+1.0
+             w[idx(nr,nc,1)] = w.get(idx(nr,nc,1),0.0)+1.0
+       prog.add_h1_threshold(name, w, 1.5, 10.0)
+    add_enemy_adj("enemy_adj_left", 0, -1)
+    add_enemy_adj("enemy_adj_right", 0, 1)
+    add_enemy_adj("enemy_adj_up", -1, 0)
+    add_enemy_adj("enemy_adj_down", 1, 0)
+
+But sub y only 0..8, row9 no sub. Including row9 sub weights no effect (obs row9 ch0 0). Enemy at row9? no. Fine. For enemy_adj_up, sub at r, enemy at r-1. If sub row0, enemy row-1 invalid. Good.
+
+Diver adjacent:
+    def add_diver_adj(name, dr, dc):
+       w={}
+       for r in range(10):
+         for c in range(10):
+           nr,nc = r+dr,c+dc
+           if 0<=nr<10 and 0<=nc<10:
+             w[idx(r,c,0)] = w.get(...)+1.0
+             w[idx(nr,nc,2)] = w.get(...)+2.0
+             w[idx(nr,nc,1)] = w.get(...)-1.0
+       prog.add_h1_threshold(name, w, 2.5, 10.0)
+    add_diver_adj("diver_adj_left",0,-1) etc.
+
+Check threshold with multiple sub weights: For a given neighbor cell, it may be neighbor to multiple sub cells? E.g., enemy_adj_left: enemy at (r,c) gets weight from sub at (r,c+1). Also sub at (r,c) gets weight from enemy at (r,c-1). Weights on same input index can accumulate from multiple pairs. For a specific input cell, ch0 sub weight may be added for multiple enemy neighbor positions? For sub cell (r,c), we add weight 1 for enemy left and enemy right? In enemy_adj_left, sub cell (r,c) weight for c=1..9. In enemy_adj_right, sub cell (r,c) weight for c=0..8. But these are separate H1 units, so no cross. Within one unit, a sub cell may be added once? For enemy_adj_left, sub at (r,c) for c=1..9, so sub col0 not added, col9 added. Enemy cell (r,c) for c=0..8. No duplicate same idx? Could a sub cell also be enemy cell in same unit? We add ch0 and ch1 different channels, so no. But a ch1 enemy cell may be added from multiple sub cells? For enemy_adj_left, enemy at (r,c) from sub at (r,c+1) only. So once. Good.
+For diver_adj, similar.
+
+Half detectors:
+    def add_channel_sum(name, ch, rows, cols, threshold=0.5):
+       w={}
+       for r in rows:
+         for c in cols:
+           w[idx(r,c,ch)] = w.get(...)+1.0
+       prog.add_h1_threshold(name,w,threshold,10.0)
+    add_channel_sum("enemy_left",1,range(9),range(5))
+    add_channel_sum("enemy_right",1,range(9),range(5,10))
+    add_channel_sum("enemy_top",1,range(5),range(10))
+    add_channel_sum("enemy_bottom",1,range(5,9),range(10))
+    add_channel_sum("sub_left",0,range(9),range(5))
+    add_channel_sum("sub_right",0,range(9),range(5,10))
+
+Diver half:
+    def add_diver_half(name, rows, cols):
+       w={}
+       for r in rows:
+         for c in cols:
+           w[idx(r,c,2)] = w.get(...)+2.0
+           w[idx(r,c,1)] = w.get(...)-1.0
+       prog.add_h1_threshold(name,w,0.5,10.0)
+    add_diver_half("diver_left", range(9), range(5))
+    add_diver_half("diver_right", range(9), range(5,10))
+
+sub_lt_k:
+    for k in range(2,9):
+       w={idx(r,c,0):1.0 for r in range(k) for c in range(10)}
+       prog.add_h1_threshold(f"sub_lt_{k}", w, 0.5, 10.0)
+diver_lt_k:
+    for k in range(2,9):
+       w={}
+       for r in range(k):
+         for c in range(10):
+           w[idx(r,c,2)] = w.get(...)+2.0
+           w[idx(r,c,1)] = w.get(...)-1.0
+       prog.add_h1_threshold(f"diver_lt_{k}", w, 0.5, 10.0)
+
+Count: surface, six, 4 enemy_adj, 4 diver_adj, 4 enemy half, 2 diver half, 2 sub half, 7 sub_lt, 7 diver_lt = 32. Good.
+
+H2:
+    def pass_h1(name, h1): prog.add_h2_gate(name, {h1:10.0}, 0.0)
+    def and_h1(name, a, b): prog.add_h2_gate(name, {a:10.0,b:10.0}, -15.0)
+    def and_not_h1(name, a, b): prog.add_h2_gate(name, {a:10.0,b:-10.0}, -15.0)
+
+    prog.add_h2_gate("h2_surface_six", {"surface":10.0,"six":10.0}, -15.0)
+    prog.add_h2_gate("h2_surface_not_six", {"surface":10.0,"six":-10.0}, -15.0)
+    prog.add_h2_gate("h2_six_not_surface", {"six":10.0,"surface":-10.0}, -15.0)
+    prog.add_h2_gate("h2_bottom", {"sub_lt_8":-10.0}, 5.0)
+    pass_h1("h2_danger_adj_left","enemy_adj_left")
+    ...
+    pass_h1("h2_danger_left","enemy_left")
+    ...
+    pass_h1("h2_diver_adj_left","diver_adj_left")
+    ...
+    and_h1("h2_diver_left","diver_left","sub_right")
+    and_h1("h2_diver_right","diver_right","sub_left")
+    for k in range(2,9):
+       and_not_h1(f"h2_diver_up_{k}", f"diver_lt_{k}", f"sub_lt_{k}")
+       and_not_h1(f"h2_diver_down_{k}", f"sub_lt_{k}", f"diver_lt_{k}")
+
+Count H2: 3+1+4+4+4+2+14=32. Wait pass_h1 danger_adj 4, danger half 4, diver_adj 4 =12. 3+1+12+2+14=32. Yes.
+
+Output:
+    up_terms = {
+       "h2_six_not_surface":50.0,
+       "h2_danger_adj_down":40.0,
+       "h2_danger_bottom":30.0,
+       "h2_diver_adj_up":25.0,
+       "h2_bottom":40.0,
+    }
+    for k in range(2,9): up_terms[f"h2_diver_up_{k}"]=3.0
+    prog.set_output_action(2, up_terms, bias=sum(up_terms.values()))
+
+    down_terms = {
+       "h2_surface_not_six":50.0,
+       "h2_danger_adj_up":40.0,
+       "h2_danger_top":30.0,
+       "h2_diver_adj_down":25.0,
+    }
+    for k in range(2,9): down_terms[f"h2_diver_down_{k}"]=3.0
+    prog.set_output_action(4, down_terms, bias=sum(down_terms.values()) + 10.0)
+
+    left_terms = {"h2_danger_adj_right":40.0, "h2_danger_right":30.0, "h2_diver_adj_left":25.0, "h2_diver_left":15.0}
+    prog.set_output_action(1, left_terms, bias=sum(left_terms.values()))
+    right_terms = {"h2_danger_adj_left":40.0, "h2_danger_left":30.0, "h2_diver_adj_right":25.0, "h2_diver_right":15.0}
+    prog.set_output_action(3, right_terms, bias=sum(right_terms.values()))
+    prog.set_output_action(0, {"h2_surface_six":50.0}, bias=50.0)
+    prog.set_output_action(5, {}, bias=0.0)
+
+    return MLPCompilerBackend.compile(prog)
+
+Need check set_output_action bias: It sets b3[act_idx] = float(rule["bias"]). If we call multiple rules for same action? We call once each. Good.
+
+Potential issue: output_bias not set, b3 initialized zeros. For action5 rule empty bias 0 sets 0. Good.
+
+Potential issue: H2 h2_bottom uses sub_lt_8. sub_lt_8 H1 true if sub rows0-7, false if row8. If sub at row8, sub_lt_8 false (-1), h2_bottom true. If sub at row0-7, false. Good.
+
+Potential issue: H1 sub_lt_k threshold 0.5. If sub at row k-1, true. If sub at row k, false. Good.
+
+Potential issue: H1 diver_lt_k with diver indicator. If no diver, sum 0 => -1. If diver in rows<k, sum positive maybe 2 per diver minus enemies. If one diver and many enemies in rows<k, sum could be negative. But if many enemies, danger likely. Could false negative. Maybe use +3 ch2 -1 ch1 for diver detectors to be more robust. For adjacent, threshold adjusted. For half/lt, use +3/-1 threshold 0.5. One diver + two enemies: 3-2=1 true. One diver + three enemies:0 false. Better. Let's use +3.0 for ch2, -1.0 for ch1 in diver half and diver_lt. For adjacent, use sub +1, ch2 +3, ch1 -1, threshold? Diver: 1+3=4; enemy:1+3-1=3. Need threshold 3.5. Use threshold 3.5. If no sub diver:3 <3.5 false. Good. If multiple, true. Let's adjust.
+Diver half/lt: +3 ch2, -1 ch1, threshold 0.5. One diver no enemy sum3 true; one diver one enemy sum2 true; two enemies sum -2 false. Good.
+Diver adjacent: sub +1, neighbor ch2 +3, neighbor ch1 -1, threshold 3.5. Diver sum4 true; enemy sum3 false; no sub diver3 false. Good.
+
+Enemy adjacent threshold 1.5 with weights 1. If multiple sub? okay.
+
+Six detector: use +2 col3, -1 col2, -1 col4 threshold 0.5. If count6 low sum1 true. If count6 and oxygen_len=2 (col2=0,col3=1,col4=1) sum1. If oxygen_len=1 (col2=0,col3=0? oxygen_len=1 col0 only, col3=1? diver count6 col3-8, so col3=1, col4=1, col2=0 sum1). Good. If oxygen_len=0, sum1. If count6 and oxygen_len=3, col2=1 sum0 false. Good.
+
+Could six detector false positive if count5 and oxygen_len? count5 col3=0,col4=1. If oxygen_len=3: col2=1,col3=1? oxygen col0-2, col3=0? Wait oxygen_len=3 => cols0,1,2. col3=0. sum 0 -1 -1 = -2 false. If oxygen_len=4 => cols0-3, col3=1,col2=1,col4=1 (diver count5 col4-8) sum2-1-1=0 false. If oxygen_len=5 => col3=1,col2=1,col4=1 sum0. Good. If count4: col4=1? count4 cols5-8, col4=0. oxygen_len=4 col3=1,col2=1,col4=0 sum1? 2*1 -1 -0 =1 true false positive! Let's check: count=4, diver gauge cols5-8, col4=0. Oxygen_len=4 (oxygen 80) cols0-3, col3=1, col2=1. sum=2-1-0=1 >0.5 => six true false. That's bad. If oxygen 80 and 4 divers, policy thinks six and surfaces terminal. Need better six detection.
+
+We need detect count=6 more reliably. Diver gauge length 6 => cols3-8. Count=4 => cols5-8. Distinguishing col3 and col4. For count6, col3=1 and col4=1. For count4 with oxygen_len=4, col3=1 (oxygen), col4=0. Our weights +2 col3 -1 col2 -1 col4: count4 oxygen_len4: col3=1,col2=1,col4=0 =>1 true. Need require col4=1. Use +1 col3, +1 col4, -1 col2? count6 low: col3=1,col4=1,col2=0 =>2 true. count4 oxygen_len4: col3=1,col4=0,col2=1 =>0 false. count5 low: col3=0,col4=1,col2=0 =>1 true? count5 should false. Need threshold 1.5? count5 sum1 <1.5 false. count6 sum2 true. count6 high oxygen_len3: col3=1,col4=1,col2=1 =>1 false (threshold1.5). count4 oxygen_len4 sum0. count5 oxygen_len4: col3=1 (oxygen), col4=1 (diver), col2=1 =>1 false. Good. Use weights col3 +1, col4 +1, col2 -1, threshold 1.5. If count6 low (oxygen_len<=2): col2=0, col3=1,col4=1 sum2 => z=10*(0.5)=5 true. If count6 oxygen_len=3: col2=1 sum1 => -5 false. If count5 low: col3=0,col4=1,col2=0 sum1 false. If count5 oxygen_len=4: col3=1,col4=1,col2=1 sum1 false. If count4 oxygen_len4: col3=1,col4=0,col2=1 sum0 false. If count3 oxygen_len5: col3=1,col4=0? count3 cols6-8, col4=0, col2=1 sum0. Good. If count6 oxygen_len=2 true. When 6 divers, oxygen likely <=50 len2, true. Good. Use six weights {col3:1, col4:1, col2:-1}, threshold 1.5.
+
+Could count6 oxygen_len=2 but col4? diver gauge cols3-8, yes col4=1. Good.
+
+What if oxygen_len=2 and count5: col3=0? oxygen cols0-1, diver count5 cols4-8, col3=0, col4=1, col2=0 sum1 false. Good.
+
+So six detector improved.
+
+Need maybe detect surface_six when six true. Good.
+
+Potential issue: H1 six with threshold 1.5, weights sum can be 2 max. gain 10 => true z=5, false z=-5 or -15. Good.
+
+Now, H1 diver_lt_k with +3/-1. If no diver but many enemies, sum negative. Good.
+
+Need maybe H1 enemy_adj detectors using ch1 includes enemy bullets. If enemy bullet adjacent, move away. Good.
+
+Could detect friendly bullet to avoid firing? no.
+
+Let's think about action sampling with 0.1 repeat. Our policy often outputs down default. If previous action down repeated, okay. If previous action up at bottom repeated, up at row7? okay. If previous action no-op at surface_six repeated after reset, terminal 10%. Could we reduce by making surface_six action down? No. Could make surface_six action fire? same. Could make surface_six action up? same. Any non-down at surface with 6 triggers surface, then repeat non-down terminal. Could choose action that if repeated after reset is down? impossible. Could maybe output no-op at surface_six, but if previous action was down? How to have previous action down and be at surface_six? If you were at row1 and action up, previous up. If you were at row0 and action down, you leave. So no. Accept.
+
+Could avoid surfacing until previous action likely down? Policy doesn't know. Maybe use 0.1 repeat to force down after surface? If previous action no-op, 10% no-op terminal. If we output down at surface_six (no surface), no terminal but no reward. Could maybe surface when six and row1 by outputting up, then at surface_six output down (miss reward) but diver_count remains 6. Then later when six and row1 again? It may loop. Not good.
+
+Could output no-op at surface_six and hope.
+
+Need maybe terminal at surface with 0 if action no-op. If previous action no-op repeated, terminal. If previous action fire repeated, terminal. If previous action left/right/up repeated, terminal. So 10% failure each surface. Over multiple surfaces, likely fail. But maybe episodes end at 10000, need survive. Could we make policy after surface reset output down with high probability, but 10% repeat previous. If previous action was down, safe. Can we arrange previous action before surface to be down? To be at surface with six, you must move up from row1. Previous action up. Unless you are at surface with six from start? no. Could you be at surface with six and previous action down by moving down from surface with six? That doesn't surface. Hmm.
+
+Maybe use action 0 no-op at surface_six, but if repeated after reset, terminal. Could we make no-op at surface with 0 not terminal by having diver_count >0? After surface reset diver_count 0. No.
+
+Could avoid surfacing with 6 by collecting 6 divers and then immediately surface? The surface reward occurs when at surface and take action. You must be at surface. To get to surface, previous action up. So unavoidable.
+
+Maybe the 0.1 repeat is part of challenge; policy can account by making previous action before surface be down? Is there a way to be at surface with six and previous action down? Suppose at row0 with six, previous action down? If previous action down, you would have moved from row0 to row1, so not at surface. Unless action down at row0 was repeated? no. So no.
+
+Could use action 5 fire at surface_six; if repeated after reset, fire at surface with 0 terminal. same.
+
+Accept.
+
+Need maybe ensure no-op action 0 not chosen at surface_not_six. surface_not_six down high. Good.
+
+Potential issue: H2 h2_surface_not_six = surface & not six. If six false negative (false -1) and surface true, true. Good. If six true positive and surface true, false. Good.
+
+Potential issue: H1 six may be false -1 when count<6. Good.
+
+Potential issue: H1 surface may be true if sub_back at row0 when sub at row1? sub_back same row, so no.
+
+Potential issue: H1 sub_lt_8 false if sub at row8. If sub at row9? impossible. Good.
+
+Potential issue: H1 enemy_adj detectors include sub at row9? no sub, but weights on row9 ch0 no effect. Enemy at row9? no.
+
+Potential issue: H1 enemy_adj_up for sub at row0, enemy at row-1 invalid. If enemy at row0 and sub row1, detected. Good.
+
+Potential issue: Diver adjacent detectors: diver at row0? spawn no, but maybe. If sub row1, diver row0, detected up. Good.
+
+Potential issue: Diver adjacent detector threshold 3.5 with weights sub +1, ch2 +3, ch1 -1. If sub cell also has enemy? ch1 at sub cell not weighted. If neighbor diver and enemy, sum3 false. Good. If neighbor diver and sub_back? sub ch0 at neighbor maybe not weighted except as sub for other pair. Could add extra +1 if neighbor is sub_back? For diver_adj_left, neighbor cell (r,c-1) may have sub_back ch0=1, but we only weight ch0 at sub cell (r,c), not neighbor ch0. So no. If sub at (r,c-1) as well? impossible. Good.
+
+Potential issue: H1 enemy_adj threshold 1.5 with weights sub +1, enemy +1. If sub cell also enemy? ch1 at sub cell not weighted except as enemy for adjacent from other sub. Could sum extra. If enemy at sub cell and sub at adjacent, maybe true. okay.
+
+Need maybe use gain 10 for all H1. For adjacent threshold 1.5/3.5, z true 5, false -5. Good.
+
+Now, code length okay. Need final answer one code block. Should we include imports? Probably not. But if MLPProgram not defined, code fails. The prompt says use following IR/backend. In final, maybe include only build_policy. They might execute in namespace with MLPProgram and MLPCompilerBackend. Good.
+
+Could include fallback imports? e.g.
+try:
+    from .ir import MLPProgram
+except ImportError:
+    pass
+But if relative not available, maybe. The instruction says return code block defining build_policy(). Adding imports might be okay but could fail if no package. Better not.
+
+Need ensure f-strings okay. Python 3.
+
+Let's manually count H1 additions in code to ensure no accidental extra. We'll write code with explicit loops.
+
+Detailed code:
+
+def build_policy():
+    def idx(r, c, ch):
+        return (r * 10 + c) * 6 + ch
+
+    prog = MLPProgram(input_dim=600, h1_dim=32, h2_dim=32, output_dim=6, activation="tanh")
+
+    # 1 surface
+    w = {idx(0, c, 0): 1.0 for c in range(10)}
+    prog.add_h1_threshold("surface", w, 0.5, 10.0)
+
+    # 2 six
+    w = {idx(9, 3, 5): 1.0, idx(9, 4, 5): 1.0, idx(9, 2, 5): -1.0}
+    prog.add_h1_threshold("six", w, 1.5, 10.0)
+
+    # enemy adj 4
+    def add_enemy_adj(name, dr, dc):
+        w = {}
+        for r in range(10):
+            for c in range(10):
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < 10 and 0 <= nc < 10:
+                    w[idx(r, c, 0)] = w.get(idx(r, c, 0), 0.0) + 1.0
+                    w[idx(nr, nc, 1)] = w.get(idx(nr, nc, 1), 0.0) + 1.0
+        prog.add_h1_threshold(name, w, 1.5, 10.0)
+
+    add_enemy_adj("enemy_adj_left", 0, -1)
+    add_enemy_adj("enemy_adj_right", 0, 1)
+    add_enemy_adj("enemy_adj_up", -1, 0)
+    add_enemy_adj("enemy_adj_down", 1, 0)
+
+    # diver adj 4
+    def add_diver_adj(name, dr, dc):
+        w = {}
+        for r in range(10):
+            for c in range(10):
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < 10 and 0 <= nc < 10:
+                    w[idx(r, c, 0)] = w.get(idx(r, c, 0), 0.0) + 1.0
+                    w[idx(nr, nc, 2)] = w.get(idx(nr, nc, 2), 0.0) + 3.0
+                    w[idx(nr, nc, 1)] = w.get(idx(nr, nc, 1), 0.0) - 1.0
+        prog.add_h1_threshold(name, w, 3.5, 10.0)
+
+    add_diver_adj("diver_adj_left", 0, -1)
+    add_diver_adj("diver_adj_right", 0, 1)
+    add_diver_adj("diver_adj_up", -1, 0)
+    add_diver_adj("diver_adj_down", 1, 0)
+
+    # enemy half 4
+    def add_channel_sum(name, ch, rows, cols):
+        w = {}
+        for r in rows:
+            for c in cols:
+                w[idx(r, c, ch)] = w.get(idx(r, c, ch), 0.0) + 1.0
+        prog.add_h1_threshold(name, w, 0.5, 10.0)
+
+    add_channel_sum("enemy_left", 1, range(9), range(5))
+    add_channel_sum("enemy_right", 1, range(9), range(5, 10))
+    add_channel_sum("enemy_top", 1, range(5), range(10))
+    add_channel_sum("enemy_bottom", 1, range(5, 9), range(10))
+
+    # diver half 2
+    def add_diver_region(name, rows, cols):
+        w = {}
+        for r in rows:
+            for c in cols:
+                w[idx(r, c, 2)] = w.get(idx(r, c, 2), 0.0) + 3.0
+                w[idx(r, c, 1)] = w.get(idx(r, c, 1), 0.0) - 1.0
+        prog.add_h1_threshold(name, w, 0.5, 10.0)
+
+    add_diver_region("diver_left", range(9), range(5))
+    add_diver_region("diver_right", range(9), range(5, 10))
+
+    # sub half 2
+    add_channel_sum("sub_left", 0, range(9), range(5))
+    add_channel_sum("sub_right", 0, range(9), range(5, 10))
+
+    # sub_lt 7
+    for k in range(2, 9):
+        w = {}
+        for r in range(k):
+            for c in range(10):
+                w[idx(r, c, 0)] = w.get(idx(r, c, 0), 0.0) + 1.0
+        prog.add_h1_threshold(f"sub_lt_{k}", w, 0.5, 10.0)
+
+    # diver_lt 7
+    for k in range(2, 9):
+        w = {}
+        for r in range(k):
+            for c in range(10):
+                w[idx(r, c, 2)] = w.get(idx(r, c, 2), 0.0) + 3.0
+                w[idx(r, c, 1)] = w.get(idx(r, c, 1), 0.0) - 1.0
+        prog.add_h1_threshold(f"diver_lt_{k}", w, 0.5, 10.0)
+
+    # H2
+    def pass_h1(name, h1_name):
+        prog.add_h2_gate(name, {h1_name: 10.0}, 0.0)
+
+    def and_h1(name, a, b):
+        prog.add_h2_gate(name, {a: 10.0, b: 10.0}, -15.0)
+
+    def and_not_h1(name, a, b):
+        prog.add_h2_gate(name, {a: 10.0, b: -10.0}, -15.0)
+
+    prog.add_h2_gate("h2_surface_six", {"surface": 10.0, "six": 10.0}, -15.0)
+    prog.add_h2_gate("h2_surface_not_six", {"surface": 10.0, "six": -10.0}, -15.0)
+    prog.add_h2_gate("h2_six_not_surface", {"six": 10.0, "surface": -10.0}, -15.0)
+    prog.add_h2_gate("h2_bottom", {"sub_lt_8": -10.0}, 5.0)
+
+    pass_h1("h2_danger_adj_left", "enemy_adj_left")
+    pass_h1("h2_danger_adj_right", "enemy_adj_right")
+    pass_h1("h2_danger_adj_up", "enemy_adj_up")
+    pass_h1("h2_danger_adj_down", "enemy_adj_down")
+
+    pass_h1("h2_danger_left", "enemy_left")
+    pass_h1("h2_danger_right", "enemy_right")
+    pass_h1("h2_danger_top", "enemy_top")
+    pass_h1("h2_danger_bottom", "enemy_bottom")
+
+    pass_h1("h2_diver_adj_left", "diver_adj_left")
+    pass_h1("h2_diver_adj_right", "diver_adj_right")
+    pass_h1("h2_diver_adj_up", "diver_adj_up")
+    pass_h1("h2_diver_adj_down", "diver_adj_down")
+
+    and_h1("h2_diver_left", "diver_left", "sub_right")
+    and_h1("h2_diver_right", "diver_right", "sub_left")
+
+    for k in range(2, 9):
+        and_not_h1(f"h2_diver_up_{k}", f"diver_lt_{k}", f"sub_lt_{k}")
+        and_not_h1(f"h2_diver_down_{k}", f"sub_lt_{k}", f"diver_lt_{k}")
+
+    # outputs
+    prog.set_output_action(0, {"h2_surface_six": 50.0}, bias=50.0)
+
+    left_terms = {
+        "h2_danger_adj_right": 40.0,
+        "h2_danger_right": 30.0,
+        "h2_diver_adj_left": 25.0,
+        "h2_diver_left": 15.0,
+    }
+    prog.set_output_action(1, left_terms, bias=sum(left_terms.values()))
+
+    up_terms = {
+        "h2_six_not_surface": 50.0,
+        "h2_danger_adj_down": 40.0,
+        "h2_danger_bottom": 30.0,
+        "h2_diver_adj_up": 25.0,
+        "h2_bottom": 40.0,
+    }
+    for k in range(2, 9):
+        up_terms[f"h2_diver_up_{k}"] = 3.0
+    prog.set_output_action(2, up_terms, bias=sum(up_terms.values()))
+
+    right_terms = {
+        "h2_danger_adj_left": 40.0,
+        "h2_danger_left": 30.0,
+        "h2_diver_adj_right": 25.0,
+        "h2_diver_right": 15.0,
+    }
+    prog.set_output_action(3, right_terms, bias=sum(right_terms.values()))
+
+    down_terms = {
+        "h2_surface_not_six": 50.0,
+        "h2_danger_adj_up": 40.0,
+        "h2_danger_top": 30.0,
+        "h2_diver_adj_down": 25.0,
+    }
+    for k in range(2, 9):
+        down_terms[f"h2_diver_down_{k}"] = 3.0
+    prog.set_output_action(4, down_terms, bias=sum(down_terms.values()) + 10.0)
+
+    prog.set_output_action(5, {}, bias=0.0)
+
+    return MLPCompilerBackend.compile(prog)
+
+Need check H2 count: pass_h1 12, and_h1 2, loop 14, plus 4 =32. Good.
+
+Potential issue: H1 add_channel_sum for sub_left/sub_right after diver_region. It uses threshold 0.5. Good.
+
+Potential issue: H1 sub_lt_k includes row0..k-1. For k=8, rows0-7. If sub at row8, false. Good.
+
+Potential issue: H1 diver_lt_k includes row0..k-1. For k=8, rows0-7. If diver at row8, false. For diver_down_k with sub_lt_8 and diver_lt_8: if sub row7, diver row8: sub_lt_8 true, diver_lt_8 false => true. Good. If sub row8, diver row7: sub_lt_8 false, diver_lt_8 true => diver_up_8 true. Good.
+
+Potential issue: Diver vertical direction if diver at row8 and sub row0: diver_lt_2..8? diver row8 false for all k<=8, sub_lt true for all, so diver_down_k true for all 7. Up boost 42. Good. If diver row1 and sub row8: diver_lt_2 true (row1), sub_lt_2 false? sub row8 false for k=2, so diver_up_2 true; for k=3..8 diver true, sub false? sub row8 false for all k<=8, so all 7 true? Wait sub row8: sub_lt_k false for k=2..8 (rows0..k-1, max row7). diver row1: diver_lt_k true for k=2..8. So diver_up_k true all 7. Good.
+
+Potential issue: If sub row0, sub_lt_k true all, diver row8 false all, diver_down_k true all. But surface priority if not six down; if six up? diver below, down_k true but six up 100, down 50+? down_k 42, down total 142? Wait down bias 176, terms: surface_not_six false? if six true, surface true? six_not_surface false, surface_not_six false. danger false, diver_adj false, down_k 7 true. Logit down = 176 - (50+40+30+25) + 7*3? Let's compute all false base 10. If down_k 7 true, boost 42 =>52. Up six boost 100 =>100. Up wins. Good.
+
+Potential issue: If no six, surface true, down surface_not_six boost 100, down_k maybe 42, down 152. Good.
+
+Potential issue: If enemy_adj_up true and down_k true, down gets 80+42=122, up maybe 0. Good.
+
+Potential issue: If enemy_adj_down true and up_k true, up gets 80+42=122, down 0. Good.
+
+Potential issue: If enemy_left half true and diver_right half true, right gets danger 60 + diver 30 =90, left 0. Good.
+
+Potential issue: If enemy_left half true and diver_left half true, right 60, left 30, right wins. Good.
+
+Potential issue: If enemy_top half true and diver_up_k true, down 60+42=102, up 42, down wins. Good.
+
+Potential issue: If enemy_bottom half true and diver_down_k true, up 60+42=102, down 42, up wins. Good.
+
+This seems reasonable.
+
+Could add fire action small when enemy_adj and no danger? But skip.
+
+Need maybe ensure output logits not too large causing softmax overflow? Max logit maybe 200, fine.
+
+Need maybe b3 bias cancellation: For action up bias 206. If all terms false, logit 0. If h2_bottom true and all others false, logit 80. If h2_six_not_surface true and bottom true, 180. Good.
+Action down bias 176. If all false, 10. If down_k 7 true, 52. If surface_not_six true, 110. If surface_not_six and down_k, 152. Good.
+Action left bias 110. If all false 0. If danger_adj_right true, 80. If danger_right true, 60. If diver_adj_left true, 50. If diver_left true, 30. If both danger_adj_right and danger_right, 140. Good.
+Action right similar.
+No-op bias 50, false 0, true 100.
+Fire 0.
+
+Potential issue: H2 pass units false -1, true +1. But H1 enemy_adj may be 0? H1 threshold with threshold 1.5: if sum=1, z=-5 => -1; if sum=2, z=5 => +1. No 0. Good.
+H1 six threshold 1.5: sum=1 => -5, sum=2 =>5. Good.
+H1 diver_adj threshold 3.5: sum=3 => -5, sum=4=>5. Good.
+H1 diver region threshold 0.5: sum=0 => -5, sum=1? Could sum=1 if one ch2? But weights +3/-1, sums multiples? If one diver sum3, one diver+enemy sum2, two enemies -2. No sum1. But if partial? no. threshold 0.5, sum2 true. Good.
+H1 sub_lt threshold 0.5: sum0 -1, sum>=1 +1.
+
+Potential issue: H1 enemy_adj with multiple sub/enemy could sum >2, true. Good.
+
+Potential issue: H1 add_enemy_adj includes pairs where sub at row9? no sub, but if enemy at row9? no. Weights on row9 ch0 no effect. Fine.
+
+Potential issue: H1 add_diver_adj includes sub at row9 no effect. Diver at row9? no.
+
+Potential issue: H1 diver region includes row0..8. Diver spawn y1..8, but could move to row? Diver moves horizontally only, y fixed. So row0 no diver. Fine.
+
+Potential issue: H1 enemy_top rows0..4. Enemy spawn y1..8, bullets can row0? maybe. Good.
+
+Potential issue: H1 enemy_bottom rows5..8. Good.
+
+Potential issue: H1 sub_left/right rows0..8. Good.
+
+Potential issue: H1 sub_lt_k rows0..k-1 includes row9? no.
+
+Now, final answer should be code block only. Need maybe not include analysis. final with ```python ... ```.
+
+Double-check user: "Design a policy from scratch, no training, no forward pass, no rollouts, no feedback, no code execution. Use only this prompt and, if instructed, the NeuralCompiler IR and backend. Output a complete Python function build_policy() that returns an ExecutableMLP of architecture 600 -> 32 -> 32 -> 6 with tanh activations. ... Use the following NeuralCompiler IR and backend to build a policy. Return one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program). Do not train, test, run model forward passes or use feedback."
+
+So final code block. Could include comments. Ensure no forward pass. Good.
+
+One more thought: The backend compile expects prog.h1_units length <=32, h2 <=32. We have exactly 32 H1? Let's count code additions:
+1 surface
+2 six
+3 enemy_adj_left
+4 enemy_adj_right
+5 enemy_adj_up
+6 enemy_adj_down
+7 diver_adj_left
+8 diver_adj_right
+9 diver_adj_up
+10 diver_adj_down
+11 enemy_left
+12 enemy_right
+13 enemy_top
+14 enemy_bottom
+15 diver_left
+16 diver_right
+17 sub_left
+18 sub_right
+19 sub_lt_2
+20 sub_lt_3
+21 sub_lt_4
+22 sub_lt_5
+23 sub_lt_6
+24 sub_lt_7
+25 sub_lt_8
+26 diver_lt_2
+27 diver_lt_3
+28 diver_lt_4
+29 diver_lt_5
+30 diver_lt_6
+31 diver_lt_7
+32 diver_lt_8
+Yes.
+
+H2 count code:
+1 h2_surface_six
+2 h2_surface_not_six
+3 h2_six_not_surface
+4 h2_bottom
+5 h2_danger_adj_left
+6 h2_danger_adj_right
+7 h2_danger_adj_up
+8 h2_danger_adj_down
+9 h2_danger_left
+10 h2_danger_right
+11 h2_danger_top
+12 h2_danger_bottom
+13 h2_diver_adj_left
+14 h2_diver_adj_right
+15 h2_diver_adj_up
+16 h2_diver_adj_down
+17 h2_diver_left
+18 h2_diver_right
+19 h2_diver_up_2
+20 h2_diver_up_3
+21 h2_diver_up_4
+22 h2_diver_up_5
+23 h2_diver_up_6
+24 h2_diver_up_7
+25 h2_diver_up_8
+26 h2_diver_down_2
+27 h2_diver_down_3
+28 h2_diver_down_4
+29 h2_diver_down_5
+30 h2_diver_down_6
+31 h2_diver_down_7
+32 h2_diver_down_8
+Yes.
+
+Potential issue: H2 h2_bottom uses sub_lt_8, which is H1. Good.
+
+Potential issue: H2 and_not_h1 for diver_up_k: a=diver_lt_k, b=sub_lt_k. If diver_lt true (+1), sub_lt false (-1): 10 +10 -15=5. If diver_lt false (-1), sub_lt true (+1): -10 -10 -15=-35. If both false: -10+10-15=-15. If both true:10-10-15=-15. Good.
+Diver_down_k: a=sub_lt, b=diver_lt. If sub true, diver false:5. Good.
+
+Potential issue: H2 h2_surface_not_six: surface true, six false: 10+10-15=5. If surface false, six true: -10-10-15=-35. If both false: -10+10-15=-15. If both true:10-10-15=-15. Good.
+h2_six_not_surface: six true, surface false:5.
+
+Potential issue: H2 h2_diver_left: diver_left true, sub_right true:5. If diver_left true, sub_right false: -5. If diver_left false, sub_right true: -5. Good.
+
+Potential issue: H1 sub_right may be true if sub_back in right half. If sub at col4 facing left? back col5 right, sub_right true, sub_left true. Then h2_diver_left = diver_left & sub_right true, h2_diver_right = diver_right & sub_left true. Could both. But okay.
+
+Could we improve sub half by using sub_lt? no.
+
+Potential issue: H1 enemy_adj detectors may detect enemy adjacent to sub_back, causing move away from back. okay.
+
+Potential issue: Diver adjacent detectors may detect diver adjacent to sub_back, move into back? okay.
+
+Potential issue: The observation channel 0 includes sub_front and sub_back. For adjacent detectors, using ch0 as sub presence may detect sub_back as sub, causing false adjacent to back. But sub_back is adjacent to front, so if enemy adjacent to back, it's two cells from front? Example sub front at x=5 facing right, back at x=4. Enemy at x=3. enemy_adj_left for sub at x=4 (back) and enemy x=3 true, but actual sub front x=5, enemy two left. Policy may move right, okay. Diver at x=3 may be considered adjacent left, move left? If actual diver two left, moving left okay. False not too bad.
+
+Potential issue: Diver adjacent detector using ch0 at back cell as sub could detect diver adjacent to back, which is two from front. Moving toward okay.
+
+Potential issue: Enemy adjacent detector using ch0 at back cell could detect enemy adjacent to back, moving away maybe okay.
+
+Potential issue: H1 enemy_adj threshold 1.5: If sub at c and enemy at c-1, sum2. But if sub_back at c-1, ch0 at c-1 not weighted in this unit? For enemy_adj_left, sub weight at c, enemy weight at c-1. If sub front at c+1, back at c, enemy at c-1: For pair sub at c (back) and enemy c-1, sub weight at c (ch0 back) + enemy c-1 =2 true. Actual enemy two left. okay.
+
+Potential issue: H1 diver_adj threshold 3.5: If sub at c (back) and diver at c-1, true. okay.
+
+Now, maybe we should include a docstring? fine.
+
+Need final answer no extra text? "Return one complete Python code block". So final just code block.
+
+Let's ensure no use of np. Good.
+
+One more consideration: The backend's add_h1_threshold multiplies input_weights by gain and sets bias -gain*threshold. For RAW type not used. For THRESHOLD, if input_weights has negative values, it multiplies. Good.
+
+For H1 six weights {col3:1, col4:1, col2:-1}, threshold 1.5. If sum=2, z=10*(2-1.5)=5. If sum=1, z=-5. Good.
+
+For H1 diver_adj weights: sub +1, ch2 +3, ch1 -1, threshold 3.5. If diver: sum4, z=5. If enemy: sum3, z=-5. If no sub diver: sum3, z=-5. Good. If sub and diver and enemy? sum3 false. If sub and two divers? sum7 true. Good.
+
+For H1 enemy_adj weights: sub +1, enemy +1, threshold1.5. If sub and enemy sum2 true. If only one sum1 false. If sub and two enemies? Could sum3 true. Good.
+
+Potential issue: In add_enemy_adj, for each r,c, we add sub weight at (r,c) and enemy at (nr,nc). For a given H1 unit, a sub cell may be added multiple times if it is neighbor to multiple enemy cells? For enemy_adj_left, sub at (r,c) added once for enemy left. But sub at (r,c) could also be enemy cell for pair sub at (r,c+1)? That adds ch1 weight at (r,c), not ch0. Different channel. So no duplicate ch0. For enemy_adj_up, sub at (r,c) added once for enemy up. Good.
+
+Potential issue: In add_diver_adj, neighbor ch2 and ch1 weights may overlap with sub ch0? different channels. Good.
+
+Potential issue: In add_diver_region, for each cell, add ch2 +3, ch1 -1. If multiple cells, sum. Good.
+
+Potential issue: H1 diver_lt_k with +3/-1 threshold 0.5. If one diver and one enemy in region, sum2 true. If one diver and two enemies, sum1 true? 3-2=1 >0.5 true. If one diver and three enemies, sum0 false. Good.
+
+Potential issue: H1 diver_left/right with +3/-1. If diver in left half and many enemies left, may false. But danger left likely.
+
+Could use +4/-1 for more robust, but then enemy only sum -1, diver+3 enemies sum1 true. +4 maybe. But threshold 0.5. If one diver +3 enemies sum1 true. +4 +3 enemies sum1? 4-3=1. Same. +5 gives 2. Could use +5 to be robust. But if many enemies, false positive? Enemy only negative. Diver+4 enemies with +5 sum1 true. Maybe okay. Let's use +4? Current +3 okay. Adjacent uses +3.
+
+Potential issue: H1 enemy_top/bottom half may cause moving away from enemy in top/bottom half, but if enemy in top half and sub top half, moving down may be good. If enemy in top half but sub bottom, moving down away? enemy top, sub bottom, moving down further away, good. If enemy top and sub top, moving down away. Good.
+
+Potential issue: H1 enemy_left/right half: if enemy left and sub left, moving right away. If enemy left and sub right, moving right away. Good.
+
+Potential issue: If enemy in left half and right half, tie. Could maybe use adjacent priority. If both half, left/right both 60. Adjacent may break. If no adjacent, tie. Softmax uniform between left/right. Could add small bias to right? Not necessary. Could set action3 bias +1? But bias cancellation base? We can set right bias sum+1, left sum. Then right slight. But arbitrary. Maybe add base 0.5 to right? Not needed.
+
+Potential issue: Default down base 10. If no conditions, down. At bottom, up 80. Good.
+
+Potential issue: If no diver and no enemy, policy down to bottom, then up to row7, down, oscillate. Oxygen depletes. But divers spawn, should direct. If diver in same half and not adjacent, may not direct. Example sub at row4 col5, diver at row4 col6 (same row, right half? sub_right true, diver_right true, diver_left false, no vertical). No adjacent if col6 adjacent? If col6 adjacent right, diver_adj_right true, move right. If diver at col8, same right half, not adjacent, no horizontal. Default down. It may move down, diver moves horizontally, maybe eventually adjacent. Could be slow. Could add horizontal direction using sub_left/right only opposite half. If same half, no. Could use sub_col_lt_2/ge_2 etc with remaining? We used all 32 H1. Could drop enemy_top/bottom to add horizontal fine. But vertical more important? Maybe horizontal same row important for collection. Divers move horizontally, so if same row, need horizontal. Adjacent handles when close. If far same half, default down may lose. Could improve by using sub_left/right and diver_left/right: if diver_right and sub_left move right; if diver_left and sub_right move left. If same half, no. Could use sub_left/right as coarse; if diver_right true and sub_left false (sub right), no. But if diver in right half and sub in right half, maybe still move right? Could default to right if diver_right true? But if sub at right edge, bad. Could use sub_right to avoid? Maybe if diver_right true and not sub_right? already. If diver_right true and sub_right true, maybe move right if sub not at right edge. Need sub_col_ge_8. We don't have. Could add by dropping enemy_top/bottom? Let's consider alternative H1 allocation to include horizontal fine.
+
+We have 32 H1. Current uses enemy_top/bottom (2). Could drop them and add sub_col_lt_2, sub_col_ge_2, sub_col_lt_8, sub_col_ge_8, diver_col_lt_2, diver_col_ge_2, diver_col_lt_8, diver_col_ge_8? That's 8, too many. Drop enemy_top/bottom (2) and maybe enemy_left/right? Need danger horizontal. Could keep enemy_left/right. Drop enemy_top/bottom, add 4 horizontal fine (sub_col_lt_2, sub_col_ge_2, diver_col_lt_2, diver_col_ge_2) = total 32? Current 32 -2 +4 =34. Need drop 2 more. Could drop sub_left/right? But need for diver half. Could use sub_col_lt_5? sub_left is sub_col_lt_5, sub_right sub_col_ge_5. We have sub_left/right. For fine, need sub_col_lt_2 and sub_col_ge_2, sub_col_lt_8 and sub_col_ge_8. Could replace sub_left/right with sub_col_lt_2/ge_2 and sub_col_lt_8/ge_8? Then lose half. Maybe not.
+
+Could drop enemy_top/bottom and diver_lt_k? No vertical.
+
+Maybe current okay.
+
+Could use H2 to implement horizontal same half by using diver_right and sub_right? For example if diver_right true and sub_right true, maybe move right if sub not at right edge. We don't have edge. Could output right with small weight when diver_right true regardless, and left when diver_left true regardless. But if sub in right half and diver right, moving right may be toward or away. If sub at col9, right no-op (stays 9) consumes oxygen. Not terrible. If sub at col5, diver at col8, moving right good. If sub at col8, diver at col5 (diver_left true, sub_right true) move left good. If diver_right true and sub_right true, moving right could be good if diver to right, bad if diver to left within right half. But maybe okay. We can add small weights: action right += diver_right 10, action left += diver_left 10, regardless of sub half. But if enemy danger, priority. This may help same half. However if diver_right true due to enemy? diver detector excludes enemy. Good. If diver in right half and sub in right half, right small. If diver in left half and sub left, left small. Could add to output terms: left_terms add "h2_diver_right"? Wait h2_diver_right is diver_right & sub_left. We need pass diver_right H1? We don't have H2 pass for diver_right half. We have h2_diver_right AND. Could add H2 pass diver_right? H2 count full. Could use H1 directly? Output only H2. Could repurpose h2_diver_right to pass diver_right? But then lose AND. Maybe use h2_diver_left/right as pass diver_left/right, and rely on output weights? If pass, action left gets diver_left 15, action right gets diver_right 15 regardless. This may be better than AND? If diver_left and sub_left, left; if diver_left and sub_right, left (good). If diver_right and sub_right, right. If diver_right and sub_left, right. So pass diver half is actually good: always move toward half where diver is. No need sub half. But if diver in left half and sub in left half, move left; if diver in right half and sub right, move right. This is a reasonable coarse direction. It may move into enemy half, but danger priority. We can change h2_diver_left/right to pass diver_left/right instead of AND. Then sub_left/right H1 unused? Could drop sub_left/right H1 and use for something else. But H2 count same. Let's evaluate.
+
+If h2_diver_left = pass diver_left, action left weight 15. If diver_left true, left. If diver_right true, right. This gives horizontal direction always. Better than AND which only opposite half. We can drop sub_left/right H1 (2) and add maybe horizontal fine or keep. But H1 count would be 30, can add sub_col edge? Let's redesign slightly.
+
+Use H1:
+- surface, six
+- enemy_adj 4, diver_adj 4
+- enemy_left/right/top/bottom 4
+- diver_left/right 2
+- sub_lt 7, diver_lt 7
+Total 28? 1+1+4+4+4+2+7+7=30. Wait no sub_left/right, no sub_row8. 30. We have 2 extra H1. Could add sub_col_lt_2 and sub_col_ge_2? Or sub_col_lt_8/ge_8. Let's add sub_col_lt_2 and sub_col_ge_2 to avoid moving left at left edge? Or sub_col_lt_8/ge_8. Maybe add both pairs? 4 extra, total 34. Only 2 extra. Add sub_col_lt_2 and sub_col_ge_2 (left edge) or sub_col_lt_8/ge_8 (right edge). Could add sub_col_lt_2 and sub_col_ge_8? Need H2 to use. But H2 count currently 32 with h2_diver_left/right AND. If change to pass, still 32. Could add H2 for edge? H2 full. Could repurpose? Maybe not.
+
+Maybe keep sub_left/right for AND? But pass diver half seems better. We can use sub_left/right in H2 for edge? For example h2_diver_left = diver_left & NOT sub_left? If diver left and sub not left (sub right), move left; if diver left and sub left, maybe no. But pass better.
+
+Could use sub_left/right to create h2_diver_left = diver_left (pass) and h2_diver_right = diver_right (pass), and use sub_left/right for danger? Not needed. Could drop sub_left/right H1 and add sub_col_lt_2/ge_2, but H2 no edge.
+
+Maybe keep current AND to avoid moving into same half? But pass may collect faster. Let's think: If diver in left half and sub in left half, AND false, default down. Pass would move left. If diver actually to right within left half (e.g., sub col1, diver col4), moving left bad. But half coarse. AND would not move. Which is better? Hard. Maybe pass with small weight 15, default down 10, so left slightly. Could be bad but maybe okay. Danger priority. I lean pass diver half is better to make progress.
+
+We can modify H2 h2_diver_left/right to pass_h1 instead of and_h1. Then sub_left/right H1 become unused. Unused H1 okay (32 limit, can have unused). But we have exactly 32 H1; unused fine. H2 count same. Output weights same. This changes behavior: if diver_left true, left boost 30 (2*15) regardless. If diver_right true, right. If both diver_left and diver_right true (divers both halves), left/right both 30. Tie. Could add small bias? no.
+
+If diver_left true and enemy_left true, right gets danger 60, left 30, right wins. Good.
+If diver_left true and enemy_right true, left 30, right 60, right wins (away from enemy right, but diver left). Maybe okay.
+
+Let's change to pass for diver half. Then sub_left/right H1 unused but okay. Could we use sub_left/right to create h2_diver_left = diver_left & NOT sub_left? No. Pass simpler.
+
+But H2 h2_diver_left currently and_h1. We can replace with pass_h1("h2_diver_left", "diver_left") and pass_h1("h2_diver_right", "diver_right"). Then H2 count still 32. sub_left/right H1 unused. That's allowed. But we allocated H1 sub_left/right; no issue. Could maybe use them for something else? Not needed.
+
+Would unused H1 affect compile? No.
+
+Maybe use sub_left/right to improve pass: h2_diver_left = diver_left & (sub_right OR sub_left?) pass. no.
+
+Let's adopt pass diver half. It may improve collection. Need adjust comments? fine.
+
+Then H2 h2_diver_left/right are pass, not AND. The names still. Output weights same.
+
+Could also make h2_danger_left/right pass enemy half already. Good.
+
+Now, H1 sub_left/right unused. Could we drop them and add sub_col_lt_2/ge_2? But code already. Unused okay. But if we want use extra H1, we have no extra because 32. Could replace sub_left/right with sub_col_lt_2 and sub_col_ge_2, and add H2? H2 full. Could use sub_col_lt_2 in h2_bottom? no. Maybe not.
+
+Could use sub_left/right in output? Output only H2. Could create H2 pass sub_left/right but H2 full. Could replace h2_diver_left/right AND with pass, freeing? No, still 2. Could replace h2_diver_left with pass diver_left, h2_diver_right pass diver_right. No free.
+
+Maybe use sub_left/right to create h2_diver_left = diver_left & NOT sub_left? That's AND with NOT, still 2. But pass better.
+
+Let's keep pass.
+
+Need update code: replace and_h1 for h2_diver_left/right with pass_h1. But pass_h1 defined before. Good.
+
+Then sub_left/right H1 unused. That's okay but maybe wasteful. Could remove sub_left/right H1 and add two more useful H1, but H2 full. What useful H1? sub_col_lt_2 and sub_col_ge_2 could be used in H2? No H2 free. Could replace h2_bottom with sub_col? no. Could use sub_col_lt_2 in h2_diver_left? e.g., h2_diver_left = diver_left & NOT sub_col_lt_2? If diver left and sub not left edge, move left. But H2 count same, need H1 sub_col_lt_2. Could replace sub_left with sub_col_lt_2, sub_right with sub_col_ge_2. Then h2_diver_left = diver_left & NOT sub_col_lt_2? If sub at col0/1, don't move left. h2_diver_right = diver_right & NOT sub_col_ge_2? If sub at col8/9, don't move right. This could avoid edge. But if sub at col0 and diver left (impossible left of col0), no. If sub at col1 and diver left col0, moving left good, but NOT sub_col_lt_2 false (sub col1 true) would prevent. Maybe use sub_col_lt_1? no.
+
+Maybe keep simple.
+
+Another idea: Use H1 sub_left/right to create h2_diver_left = diver_left & NOT sub_left? If diver left and sub not left (sub right), move left; if sub left, no. That's original AND with sub_right (since sub_right ~ not sub_left). We had AND. Pass may be better. Hard.
+
+Given no testing, choose pass for progress.
+
+Need maybe adjust output weights for diver half: 15. If pass, both diver_left and diver_right can be true if divers both halves. left/right both 30. Default down 10. Tie left/right. okay.
+
+Let's update final code accordingly.
+
+One more potential: H1 enemy_adj detectors may be true for enemy bullet adjacent. Moving away from bullet good. But if enemy bullet adjacent and diver adjacent same direction, danger wins. Good.
+
+Potential: H1 enemy_adj_up/down may be true for enemy bullet above/below. Moving down/up away. Good.
+
+Potential: H1 enemy_top/bottom half may cause moving away from enemy in top/bottom half, but if enemy in top half and sub top, moving down. Good.
+
+Potential: H1 enemy_left/right half may cause moving away from enemy in left/right half. Good.
+
+Potential: H1 diver_adj detectors may be true for diver adjacent. Moving into diver collects. Good.
+
+Potential: If diver adjacent and enemy adjacent same cell? enemy priority. Good.
+
+Potential: If diver adjacent up and enemy adjacent down, up gets diver 50, down gets danger 80, down wins (avoid enemy). Good.
+
+Potential: If six_not_surface and enemy_adj_down, up gets 100+80=180, down 80, up wins. Good.
+
+Potential: If surface_six and enemy_adj_down, no-op 100, up 80, no-op. Good.
+
+Now, final code with pass diver half.
+
+Double-check sum(up_terms.values()) with 7*3 =21, total 206. down total 166+10=176. left total 110. right 110.
+
+Could set action5 bias 0. If all other logits 0, fire 0, uniform among 0,1,2,3,5? Down base 10, so down. Good.
+
+Potential issue: b3 for action0 set 50, action1 110, action2 206, action3 110, action4 176, action5 0. If all H2 false, logits: 0,0,0,0,10,0. Good. But H2 false all? At initial, surface_not_six true, so down 110. Good.
+
+Potential issue: Some H2 may be false -1, but bias cancellation assumes all terms false -1. If a H2 term is not present? All terms present. Good.
+
+Potential issue: H2 h2_bottom false -1 when not bottom. Up bias includes 40, so false penalty -40 canceled by bias. Good.
+
+Potential issue: H2 h2_diver_up_k false -1 for all k when no diver above. Up bias includes 21, canceled. Good.
+
+Potential issue: If a H2 unit is true +1, boost 2w. If multiple true, boosts add. Good.
+
+Potential issue: H2 units may output not exactly ±1 due to tanh(5)=0.9999, tanh(-5)=-0.9999. Bias cancellation approximate, small errors. Fine.
+
+Potential issue: H1 units may output not exactly ±1 due to tanh(5). Fine.
+
+Potential issue: H2 gates with bias -15 and terms 10: true z=5, false z=-5 or -15. tanh(-15) ~ -1. Good.
+
+Potential issue: H2 h2_bottom with bias 5, term -10: true z=15, false z=-5. Good.
+
+Potential issue: H1 six true z=5, false z=-5 or -15. Good.
+
+Now, final. Ensure code block only. Use no external imports.
+
+Let's produce final.
+</think>
+
+```python
+def build_policy():
+    def idx(r, c, ch):
+        return (r * 10 + c) * 6 + ch
+
+    prog = MLPProgram(
+        input_dim=600,
+        h1_dim=32,
+        h2_dim=32,
+        output_dim=6,
+        activation="tanh",
+    )
+
+    # ------------------------------------------------------------------
+    # Layer 1: 32 hand-designed feature detectors.
+    # ------------------------------------------------------------------
+
+    # Surface: sub is in row 0.
+    w = {idx(0, c, 0): 1.0 for c in range(10)}
+    prog.add_h1_threshold("surface", w, 0.5, 10.0)
+
+    # Six divers: use the right-aligned diver gauge pattern.
+    # When oxygen is low enough, count=6 gives col3=1, col4=1, col2=0.
+    w = {
+        idx(9, 3, 5): 1.0,
+        idx(9, 4, 5): 1.0,
+        idx(9, 2, 5): -1.0,
+    }
+    prog.add_h1_threshold("six", w, 1.5, 10.0)
+
+    # Enemy immediately adjacent to the sub.
+    def add_enemy_adj(name, dr, dc):
+        w = {}
+        for r in range(10):
+            for c in range(10):
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < 10 and 0 <= nc < 10:
+                    w[idx(r, c, 0)] = w.get(idx(r, c, 0), 0.0) + 1.0
+                    w[idx(nr, nc, 1)] = w.get(idx(nr, nc, 1), 0.0) + 1.0
+        prog.add_h1_threshold(name, w, 1.5, 10.0)
+
+    add_enemy_adj("enemy_adj_left", 0, -1)
+    add_enemy_adj("enemy_adj_right", 0, 1)
+    add_enemy_adj("enemy_adj_up", -1, 0)
+    add_enemy_adj("enemy_adj_down", 1, 0)
+
+    # Diver immediately adjacent to the sub.
+    # Diver indicator is channel 2 without channel 1.
+    def add_diver_adj(name, dr, dc):
+        w = {}
+        for r in range(10):
+            for c in range(10):
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < 10 and 0 <= nc < 10:
+                    w[idx(r, c, 0)] = w.get(idx(r, c, 0), 0.0) + 1.0
+                    w[idx(nr, nc, 2)] = w.get(idx(nr, nc, 2), 0.0) + 3.0
+                    w[idx(nr, nc, 1)] = w.get(idx(nr, nc, 1), 0.0) - 1.0
+        prog.add_h1_threshold(name, w, 3.5, 10.0)
+
+    add_diver_adj("diver_adj_left", 0, -1)
+    add_diver_adj("diver_adj_right", 0, 1)
+    add_diver_adj("diver_adj_up", -1, 0)
+    add_diver_adj("diver_adj_down", 1, 0)
+
+    # Coarse enemy half-space detectors.
+    def add_channel_sum(name, ch, rows, cols):
+        w = {}
+        for r in rows:
+            for c in cols:
+                w[idx(r, c, ch)] = w.get(idx(r, c, ch), 0.0) + 1.0
+        prog.add_h1_threshold(name, w, 0.5, 10.0)
+
+    add_channel_sum("enemy_left", 1, range(9), range(5))
+    add_channel_sum("enemy_right", 1, range(9), range(5, 10))
+    add_channel_sum("enemy_top", 1, range(5), range(10))
+    add_channel_sum("enemy_bottom", 1, range(5, 9), range(10))
+
+    # Coarse diver half-space detectors.
+    def add_diver_region(name, rows, cols):
+        w = {}
+        for r in rows:
+            for c in cols:
+                w[idx(r, c, 2)] = w.get(idx(r, c, 2), 0.0) + 3.0
+                w[idx(r, c, 1)] = w.get(idx(r, c, 1), 0.0) - 1.0
+        prog.add_h1_threshold(name, w, 0.5, 10.0)
+
+    add_diver_region("diver_left", range(9), range(5))
+    add_diver_region("diver_right", range(9), range(5, 10))
+
+    # Sub half-space detectors.
+    add_channel_sum("sub_left", 0, range(9), range(5))
+    add_channel_sum("sub_right", 0, range(9), range(5, 10))
+
+    # Sub row comparison features: sub_y < k.
+    for k in range(2, 9):
+        w = {}
+        for r in range(k):
+            for c in range(10):
+                w[idx(r, c, 0)] = w.get(idx(r, c, 0), 0.0) + 1.0
+        prog.add_h1_threshold(f"sub_lt_{k}", w, 0.5, 10.0)
+
+    # Diver row comparison features: some diver is in rows < k.
+    for k in range(2, 9):
+        w = {}
+        for r in range(k):
+            for c in range(10):
+                w[idx(r, c, 2)] = w.get(idx(r, c, 2), 0.0) + 3.0
+                w[idx(r, c, 1)] = w.get(idx(r, c, 1), 0.0) - 1.0
+        prog.add_h1_threshold(f"diver_lt_{k}", w, 0.5, 10.0)
+
+    # ------------------------------------------------------------------
+    # Layer 2: 32 symbolic gates / passes.
+    # ------------------------------------------------------------------
+
+    def pass_h1(name, h1_name):
+        prog.add_h2_gate(name, {h1_name: 10.0}, 0.0)
+
+    def and_h1(name, a, b):
+        prog.add_h2_gate(name, {a: 10.0, b: 10.0}, -15.0)
+
+    def and_not_h1(name, a, b):
+        prog.add_h2_gate(name, {a: 10.0, b: -10.0}, -15.0)
+
+    # Surface / diver-count state.
+    prog.add_h2_gate("h2_surface_six", {"surface": 10.0, "six": 10.0}, -15.0)
+    prog.add_h2_gate("h2_surface_not_six", {"surface": 10.0, "six": -10.0}, -15.0)
+    prog.add_h2_gate("h2_six_not_surface", {"six": 10.0, "surface": -10.0}, -15.0)
+
+    # Bottom row: sub_y == 8 is equivalent to NOT sub_y < 8.
+    prog.add_h2_gate("h2_bottom", {"sub_lt_8": -10.0}, 5.0)
+
+    # Immediate danger passes.
+    pass_h1("h2_danger_adj_left", "enemy_adj_left")
+    pass_h1("h2_danger_adj_right", "enemy_adj_right")
+    pass_h1("h2_danger_adj_up", "enemy_adj_up")
+    pass_h1("h2_danger_adj_down", "enemy_adj_down")
+
+    # Coarse danger passes.
+    pass_h1("h2_danger_left", "enemy_left")
+    pass_h1("h2_danger_right", "enemy_right")
+    pass_h1("h2_danger_top", "enemy_top")
+    pass_h1("h2_danger_bottom", "enemy_bottom")
+
+    # Immediate diver passes.
+    pass_h1("h2_diver_adj_left", "diver_adj_left")
+    pass_h1("h2_diver_adj_right", "diver_adj_right")
+    pass_h1("h2_diver_adj_up", "diver_adj_up")
+    pass_h1("h2_diver_adj_down", "diver_adj_down")
+
+    # Coarse diver direction passes.
+    pass_h1("h2_diver_left", "diver_left")
+    pass_h1("h2_diver_right", "diver_right")
+
+    # Vertical diver direction using row comparisons.
+    for k in range(2, 9):
+        and_not_h1(f"h2_diver_up_{k}", f"diver_lt_{k}", f"sub_lt_{k}")
+        and_not_h1(f"h2_diver_down_{k}", f"sub_lt_{k}", f"diver_lt_{k}")
+
+    # ------------------------------------------------------------------
+    # Output logits.
+    #
+    # Biases are chosen so that when all listed H2 gates are false (-1),
+    # the logit is a small base value. A true gate (+1) adds 2 * weight.
+    # ------------------------------------------------------------------
+
+    # 0 = no-op: surface only when carrying six divers.
+    prog.set_output_action(
+        0,
+        {"h2_surface_six": 50.0},
+        bias=50.0,
+    )
+
+    # 1 = left.
+    left_terms = {
+        "h2_danger_adj_right": 40.0,
+        "h2_danger_right": 30.0,
+        "h2_diver_adj_left": 25.0,
+        "h2_diver_left": 15.0,
+    }
+    prog.set_output_action(1, left_terms, bias=sum(left_terms.values()))
+
+    # 2 = up.
+    up_terms = {
+        "h2_six_not_surface": 50.0,
+        "h2_danger_adj_down": 40.0,
+        "h2_danger_bottom": 30.0,
+        "h2_diver_adj_up": 25.0,
+        "h2_bottom": 40.0,
+    }
+    for k in range(2, 9):
+        up_terms[f"h2_diver_up_{k}"] = 3.0
+    prog.set_output_action(2, up_terms, bias=sum(up_terms.values()))
+
+    # 3 = right.
+    right_terms = {
+        "h2_danger_adj_left": 40.0,
+        "h2_danger_left": 30.0,
+        "h2_diver_adj_right": 25.0,
+        "h2_diver_right": 15.0,
+    }
+    prog.set_output_action(3, right_terms, bias=sum(right_terms.values()))
+
+    # 4 = down.
+    down_terms = {
+        "h2_surface_not_six": 50.0,
+        "h2_danger_adj_up": 40.0,
+        "h2_danger_top": 30.0,
+        "h2_diver_adj_down": 25.0,
+    }
+    for k in range(2, 9):
+        down_terms[f"h2_diver_down_{k}"] = 3.0
+    prog.set_output_action(4, down_terms, bias=sum(down_terms.values()) + 10.0)
+
+    # 5 = fire: intentionally low priority / unused in this policy.
+    prog.set_output_action(5, {}, bias=0.0)
+
+    return MLPCompilerBackend.compile(prog)
+```

@@ -1,0 +1,20 @@
+{
+  "fair": {
+    "mean": 9.29,
+    "se": 1.75,
+    "min": 0,
+    "max": 29,
+    "mean_len": 435.9,
+    "capped": 0,
+    "episodes": 24
+  },
+  "oracle": {
+    "mean": 1710.79,
+    "se": 72.62,
+    "min": 242,
+    "max": 1868,
+    "mean_len": 9424.9,
+    "capped": 21,
+    "episodes": 24
+  }
+}

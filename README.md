@@ -98,6 +98,20 @@ The previous six-layer shortest-path experiment used the same incomplete pivot s
 
 Two additional hand-authored IR programs in [llm_compiled_unseen_tasks.py](llm_compiled_unseen_tasks.py) scored 500/500 each in their respective test distributions. Their actual architecture is `(d=128, layers=6, heads=4)`, with 1,186,560 parameters. The script runs existing programs; it does not invoke an LLM or independently verify the provenance of their authoring.
 
+### Relation to Tracr
+
+[Tracr](https://arxiv.org/abs/2301.05062) (Lindner et al., 2023) compiles programs written in the RASP language into Transformer weights. The Transformer backend here shares its basic idea, named variables stored in disjoint residual-stream subspaces, but works at a lower level and makes different trade-offs:
+
+| | Tracr | This repository's Transformer backend |
+| --- | --- | --- |
+| Program input | RASP programs; the compiler derives the computation graph and assigns operations to layers | Hand-written IR of registers and circuit primitives; each operation names its layer and head explicitly |
+| Value encoding | Categorical (one-hot) or numerical (scalar) encodings; categorical MLPs are lookup tables, and numerical MLPs approximate functions over a finite input set | Mostly continuous scalar registers; comparisons, minima and selection are built from ReLU identities and high-scale softmax attention |
+| Architecture | Width and depth follow from the program | The user chooses `(d_model, layers, heads)`; compilation fails if the program's registers, layers or heads do not fit |
+| Correctness | Determined by the compiled RASP semantics, with attention approximating hard selection | Empirical: 500/500 on the tested, bounded input distributions; depends on attention scales and sentinel values (see above) |
+| Model components | Token and position embeddings and an unembedding; no LayerNorm | Inputs written directly into registers; no embeddings, output head or LayerNorm |
+
+Neither system grafts circuits into a pretrained language model: Tracr builds models from scratch, and the grafting experiment below uses a specially constructed sparse host. This repository does not include RASP support or a head-to-head benchmark against Tracr, so the comparison describes design differences rather than measured performance.
+
 ## Controlled circuit grafting
 
 [stage3_circuit_grafting.py](stage3_circuit_grafting.py) builds a synthetic host with 1,582,080 allocated parameters, 95 nonzero weights and explicitly reserved resources. A hand-wired addition circuit adds 68 nonzero weights using reserved dimensions and units. In the rerun, host task accuracy was 500/500 both before and after grafting, and the maximum measured host-output difference was zero on those 500 inputs. Addition scored 500/500 random examples and 100/100 generated carry-chain stress examples.

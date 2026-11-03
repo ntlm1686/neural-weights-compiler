@@ -1,0 +1,162 @@
+```python
+def build_policy():
+    prog = MLPProgram(
+        input_dim=600,
+        h1_dim=32,
+        h2_dim=32,
+        output_dim=6,
+        activation="tanh",
+    )
+
+    rows = list(range(1, 9))
+    cols = 10
+    chs = 6
+    grid_shape = (10, 10, 6)
+
+    enemy_names = {}
+    gold_names = {}
+    up_gate_names = {}
+    down_gate_names = {}
+
+    for r in rows:
+        enemy_names[r] = f"enemy_r{r}"
+        gold_names[r] = f"gold_r{r}"
+        up_gate_names[r] = f"up_gate_r{r}"
+        down_gate_names[r] = f"down_gate_r{r}"
+
+    for r in rows:
+        enemy_w = prog.add_spatial_coord_extractor(
+            name=enemy_names[r],
+            grid_shape=grid_shape,
+            channel=1,
+            col_weights=[1.0] * cols,
+            row_filter=[r],
+        )
+        prog.add_h1_threshold(
+            name=enemy_names[r],
+            input_weights=enemy_w,
+            threshold=0.5,
+            gain=10.0,
+        )
+
+        gold_w = prog.add_spatial_coord_extractor(
+            name=gold_names[r],
+            grid_shape=grid_shape,
+            channel=2,
+            col_weights=[1.0] * cols,
+            row_filter=[r],
+        )
+        prog.add_h1_threshold(
+            name=gold_names[r],
+            input_weights=gold_w,
+            threshold=0.5,
+            gain=10.0,
+        )
+
+        up_gate_w = prog.add_spatial_coord_extractor(
+            name=up_gate_names[r],
+            grid_shape=grid_shape,
+            channel=0,
+            col_weights=[1.0] * cols,
+            row_filter=list(range(r + 1, 9)),
+        )
+        prog.add_h1_threshold(
+            name=up_gate_names[r],
+            input_weights=up_gate_w,
+            threshold=0.5,
+            gain=10.0,
+        )
+
+        down_gate_w = prog.add_spatial_coord_extractor(
+            name=down_gate_names[r],
+            grid_shape=grid_shape,
+            channel=0,
+            col_weights=[1.0] * cols,
+            row_filter=list(range(1, r)),
+        )
+        prog.add_h1_threshold(
+            name=down_gate_names[r],
+            input_weights=down_gate_w,
+            threshold=0.5,
+            gain=10.0,
+        )
+
+    up_safe_names = {}
+    down_safe_names = {}
+    up_gold_names = {}
+    down_gold_names = {}
+
+    for r in rows:
+        up_safe_names[r] = f"up_safe_r{r}"
+        down_safe_names[r] = f"down_safe_r{r}"
+        up_gold_names[r] = f"up_gold_r{r}"
+        down_gold_names[r] = f"down_gold_r{r}"
+
+        prog.add_h2_gate(
+            name=up_safe_names[r],
+            h1_terms={
+                enemy_names[r]: -3.0,
+                up_gate_names[r]: 3.0,
+            },
+            bias=-3.0,
+        )
+
+        prog.add_h2_gate(
+            name=down_safe_names[r],
+            h1_terms={
+                enemy_names[r]: -3.0,
+                down_gate_names[r]: 3.0,
+            },
+            bias=-3.0,
+        )
+
+        prog.add_h2_gate(
+            name=up_gold_names[r],
+            h1_terms={
+                gold_names[r]: 3.0,
+                enemy_names[r]: -3.0,
+                up_gate_names[r]: 3.0,
+            },
+            bias=-6.0,
+        )
+
+        prog.add_h2_gate(
+            name=down_gold_names[r],
+            h1_terms={
+                gold_names[r]: 3.0,
+                enemy_names[r]: -3.0,
+                down_gate_names[r]: 3.0,
+            },
+            bias=-6.0,
+        )
+
+    prog.output_bias = [-10.0, -10.0, -10.0, -10.0, -10.0, -10.0]
+
+    prog.set_output_action(
+        action_idx=0,
+        h2_terms={},
+        bias=1.5,
+    )
+
+    up_terms = {}
+    for r in rows:
+        up_terms[up_gold_names[r]] = 2.0
+        up_terms[up_safe_names[r]] = 1.0
+    prog.set_output_action(
+        action_idx=2,
+        h2_terms=up_terms,
+        bias=25.0,
+    )
+
+    down_terms = {}
+    for r in rows:
+        down_terms[down_gold_names[r]] = 2.0
+        down_terms[down_safe_names[r]] = 1.0
+    prog.set_output_action(
+        action_idx=4,
+        h2_terms=down_terms,
+        bias=24.0,
+    )
+
+    return MLPCompilerBackend.compile(prog)
+```

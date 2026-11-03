@@ -1,0 +1,327 @@
+```python
+def build_policy():
+    prog = MLPProgram(
+        input_dim=600,
+        h1_dim=32,
+        h2_dim=32,
+        output_dim=6,
+        activation="tanh",
+    )
+
+    def idx(r, c, ch):
+        return (r * 10 + c) * 6 + ch
+
+    # --- Layer 1: compact spatial / count / gauge features ---
+
+    # Sub position, kept in a roughly linear tanh range.
+    prog.add_h1_and_gate(
+        name="sub_x",
+        group_a_indices=[idx(0, 0, 0)],
+        group_b_indices=[idx(0, 0, 0)],
+        gain=0.0,
+    )
+    prog.h1_units[-1] = {
+        "name": "sub_x",
+        "type": "RAW",
+        "input_weights": {idx(r, c, 0): 0.05 * (c - 4.5) for r in range(10) for c in range(10)},
+        "bias": 0.0,
+    }
+
+    prog.add_h1_and_gate(
+        name="sub_y",
+        group_a_indices=[idx(0, 0, 0)],
+        group_b_indices=[idx(0, 0, 0)],
+        gain=0.0,
+    )
+    prog.h1_units[-1] = {
+        "name": "sub_y",
+        "type": "RAW",
+        "input_weights": {idx(r, c, 0): 0.05 * (r - 4.0) for r in range(10) for c in range(10)},
+        "bias": 0.0,
+    }
+
+    # Threat centroid (enemy fish/sub/bullets).
+    prog.add_h1_and_gate(
+        name="threat_x",
+        group_a_indices=[idx(0, 0, 1)],
+        group_b_indices=[idx(0, 0, 1)],
+        gain=0.0,
+    )
+    prog.h1_units[-1] = {
+        "name": "threat_x",
+        "type": "RAW",
+        "input_weights": {idx(r, c, 1): 0.012 * (c - 4.5) for r in range(10) for c in range(10)},
+        "bias": 0.0,
+    }
+
+    prog.add_h1_and_gate(
+        name="threat_y",
+        group_a_indices=[idx(0, 0, 1)],
+        group_b_indices=[idx(0, 0, 1)],
+        gain=0.0,
+    )
+    prog.h1_units[-1] = {
+        "name": "threat_y",
+        "type": "RAW",
+        "input_weights": {idx(r, c, 1): 0.012 * (r - 4.0) for r in range(10) for c in range(10)},
+        "bias": 0.0,
+    }
+
+    # Diver-like centroid: channel 2 has divers + enemies, channel 1 has enemies,
+    # so enemies largely cancel and divers remain.
+    prog.add_h1_and_gate(
+        name="diver_x",
+        group_a_indices=[idx(0, 0, 2)],
+        group_b_indices=[idx(0, 0, 2)],
+        gain=0.0,
+    )
+    prog.h1_units[-1] = {
+        "name": "diver_x",
+        "type": "RAW",
+        "input_weights": {
+            idx(r, c, 2): 0.02 * (c - 4.5) for r in range(10) for c in range(10)
+        },
+        "bias": 0.0,
+    }
+    for r in range(10):
+        for c in range(10):
+            prog.h1_units[-1]["input_weights"][idx(r, c, 1)] = (
+                prog.h1_units[-1]["input_weights"].get(idx(r, c, 1), 0.0) - 0.02 * (c - 4.5)
+            )
+
+    prog.add_h1_and_gate(
+        name="diver_y",
+        group_a_indices=[idx(0, 0, 2)],
+        group_b_indices=[idx(0, 0, 2)],
+        gain=0.0,
+    )
+    prog.h1_units[-1] = {
+        "name": "diver_y",
+        "type": "RAW",
+        "input_weights": {
+            idx(r, c, 2): 0.02 * (r - 4.0) for r in range(10) for c in range(10)
+        },
+        "bias": 0.0,
+    }
+    for r in range(10):
+        for c in range(10):
+            prog.h1_units[-1]["input_weights"][idx(r, c, 1)] = (
+                prog.h1_units[-1]["input_weights"].get(idx(r, c, 1), 0.0) - 0.02 * (r - 4.0)
+            )
+
+    # Counts, kept small to avoid hard saturation.
+    prog.add_h1_and_gate(
+        name="threat_count",
+        group_a_indices=[idx(0, 0, 1)],
+        group_b_indices=[idx(0, 0, 1)],
+        gain=0.0,
+    )
+    prog.h1_units[-1] = {
+        "name": "threat_count",
+        "type": "RAW",
+        "input_weights": {idx(r, c, 1): 0.02 for r in range(10) for c in range(10)},
+        "bias": 0.0,
+    }
+
+    prog.add_h1_and_gate(
+        name="target_count",
+        group_a_indices=[idx(0, 0, 2)],
+        group_b_indices=[idx(0, 0, 2)],
+        gain=0.0,
+    )
+    prog.h1_units[-1] = {
+        "name": "target_count",
+        "type": "RAW",
+        "input_weights": {idx(r, c, 2): 0.02 for r in range(10) for c in range(10)},
+        "bias": 0.0,
+    }
+
+    prog.add_h1_and_gate(
+        name="diver_count",
+        group_a_indices=[idx(0, 0, 2)],
+        group_b_indices=[idx(0, 0, 2)],
+        gain=0.0,
+    )
+    prog.h1_units[-1] = {
+        "name": "diver_count",
+        "type": "RAW",
+        "input_weights": {
+            idx(r, c, 2): 0.08 for r in range(10) for c in range(10)
+        },
+        "bias": 0.0,
+    }
+    for r in range(10):
+        for c in range(10):
+            prog.h1_units[-1]["input_weights"][idx(r, c, 1)] = (
+                prog.h1_units[-1]["input_weights"].get(idx(r, c, 1), 0.0) - 0.08
+            )
+
+    # Binary-ish detectors.
+    prog.add_h1_threshold(
+        name="sub_at_surface",
+        input_weights={idx(0, c, 0): 1.0 for c in range(10)},
+        threshold=0.5,
+        gain=10.0,
+    )
+
+    prog.add_h1_threshold(
+        name="sub_at_bottom",
+        input_weights={idx(8, c, 0): 1.0 for c in range(10)},
+        threshold=0.5,
+        gain=10.0,
+    )
+
+    prog.add_h1_threshold(
+        name="threat_any",
+        input_weights={idx(r, c, 1): 1.0 for r in range(10) for c in range(10)},
+        threshold=0.5,
+        gain=10.0,
+    )
+
+    prog.add_h1_threshold(
+        name="diver_any",
+        input_weights={
+            idx(r, c, 2): 1.0 for r in range(10) for c in range(10)
+        },
+        threshold=0.5,
+        gain=10.0,
+    )
+    for r in range(10):
+        for c in range(10):
+            prog.h1_units[-1]["input_weights"][idx(r, c, 1)] = (
+                prog.h1_units[-1]["input_weights"].get(idx(r, c, 1), 0.0) - 1.0
+            )
+    prog.h1_units[-1]["threshold"] = 0.5
+
+    prog.add_h1_threshold(
+        name="diver_count_high",
+        input_weights={
+            idx(r, c, 2): 1.0 for r in range(10) for c in range(10)
+        },
+        threshold=5.5,
+        gain=10.0,
+    )
+    for r in range(10):
+        for c in range(10):
+            prog.h1_units[-1]["input_weights"][idx(r, c, 1)] = (
+                prog.h1_units[-1]["input_weights"].get(idx(r, c, 1), 0.0) - 1.0
+            )
+
+    # Oxygen gauge: row 9, channel 5.  col 0 is present only when oxygen >= 20.
+    prog.add_h1_threshold(
+        name="oxygen_low",
+        input_weights={idx(9, 0, 5): -1.0},
+        threshold=-0.5,
+        gain=10.0,
+    )
+
+    # col 0-2 missing means oxygen < 60.
+    prog.add_h1_threshold(
+        name="oxygen_medium",
+        input_weights={idx(9, c, 5): -1.0 for c in range(3)},
+        threshold=-2.5,
+        gain=10.0,
+    )
+
+    # Friendly bullet presence, used to avoid spamming fire.
+    prog.add_h1_threshold(
+        name="friendly_bullet_any",
+        input_weights={idx(r, c, 3): 1.0 for r in range(10) for c in range(10)},
+        threshold=0.5,
+        gain=10.0,
+    )
+
+    # --- Layer 2: action scores ---
+
+    # No-op: mild default, suppressed when at surface (to avoid accidental surfacing)
+    # and when oxygen is low.
+    prog.add_h2_gate(
+        name="score_noop",
+        h1_terms={
+            "sub_at_surface": -2.0,
+            "oxygen_low": -2.0,
+            "oxygen_medium": -0.5,
+        },
+        bias=0.35,
+    )
+
+    # Left: move toward diver-like targets and away from threats.
+    prog.add_h2_gate(
+        name="score_left",
+        h1_terms={
+            "sub_x": 0.9,
+            "diver_x": -1.2,
+            "threat_x": 0.7,
+            "threat_any": 0.25,
+            "diver_any": 0.15,
+        },
+        bias=-0.15,
+    )
+
+    # Up: surface when oxygen is low or when enough divers are likely collected;
+    # also move up if threats are below.
+    prog.add_h2_gate(
+        name="score_up",
+        h1_terms={
+            "oxygen_low": 4.0,
+            "oxygen_medium": 1.2,
+            "diver_count_high": 2.5,
+            "threat_y": 0.8,
+            "sub_y": -0.5,
+            "sub_at_surface": -3.0,
+        },
+        bias=-0.25,
+    )
+
+    # Right: move toward diver-like targets and away from threats.
+    prog.add_h2_gate(
+        name="score_right",
+        h1_terms={
+            "sub_x": -0.9,
+            "diver_x": 1.2,
+            "threat_x": -0.7,
+            "threat_any": 0.25,
+            "diver_any": 0.15,
+        },
+        bias=-0.15,
+    )
+
+    # Down: default exploration/collecting action, especially when not at surface
+    # and oxygen is not low; also move down if threats are above.
+    prog.add_h2_gate(
+        name="score_down",
+        h1_terms={
+            "sub_at_surface": 3.5,
+            "oxygen_low": -3.5,
+            "oxygen_medium": -0.8,
+            "diver_any": 0.8,
+            "diver_count": 0.6,
+            "threat_y": -0.8,
+            "sub_y": 0.4,
+            "sub_at_bottom": -1.5,
+        },
+        bias=0.25,
+    )
+
+    # Fire: when threats are present and no friendly bullet is already active.
+    prog.add_h2_gate(
+        name="score_fire",
+        h1_terms={
+            "threat_any": 3.0,
+            "threat_count": 1.5,
+            "friendly_bullet_any": -2.5,
+            "sub_at_surface": -0.5,
+        },
+        bias=-0.35,
+    )
+
+    # --- Output: map action scores to logits ---
+    prog.set_output_action(0, {"score_noop": 6.0}, bias=0.0)
+    prog.set_output_action(1, {"score_left": 6.0}, bias=0.0)
+    prog.set_output_action(2, {"score_up": 6.0}, bias=0.0)
+    prog.set_output_action(3, {"score_right": 6.0}, bias=0.0)
+    prog.set_output_action(4, {"score_down": 6.0}, bias=0.0)
+    prog.set_output_action(5, {"score_fire": 6.0}, bias=0.0)
+
+    return MLPCompilerBackend.compile(prog)
+```

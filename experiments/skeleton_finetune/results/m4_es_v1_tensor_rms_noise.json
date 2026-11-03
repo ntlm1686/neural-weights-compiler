@@ -1,0 +1,642 @@
+[
+  {
+    "game": "breakout",
+    "variant": "glue",
+    "gen": 5,
+    "env_steps": 233438,
+    "pop_mean": 13.102272727272727,
+    "eval": 21.766666666666666,
+    "eval_se": 3.2182408353126832,
+    "n_params": 326
+  },
+  {
+    "game": "breakout",
+    "variant": "glue",
+    "gen": 10,
+    "env_steps": 477942,
+    "pop_mean": 9.465909090909092,
+    "eval": 17.0,
+    "eval_se": 2.34615524730237,
+    "n_params": 326
+  },
+  {
+    "game": "breakout",
+    "variant": "glue",
+    "gen": 15,
+    "env_steps": 806082,
+    "pop_mean": 12.295454545454545,
+    "eval": 27.166666666666668,
+    "eval_se": 3.8250877501432954,
+    "n_params": 326
+  },
+  {
+    "game": "breakout",
+    "variant": "glue",
+    "gen": 20,
+    "env_steps": 938066,
+    "pop_mean": 11.761363636363637,
+    "eval": 18.366666666666667,
+    "eval_se": 2.721716506313753,
+    "n_params": 326
+  },
+  {
+    "game": "breakout",
+    "variant": "glue",
+    "gen": 25,
+    "env_steps": 1028676,
+    "pop_mean": 11.375,
+    "eval": 30.933333333333334,
+    "eval_se": 5.4774149079720145,
+    "n_params": 326
+  },
+  {
+    "game": "breakout",
+    "variant": "glue",
+    "gen": 30,
+    "env_steps": 1149448,
+    "pop_mean": 15.454545454545455,
+    "eval": 43.2,
+    "eval_se": 6.388774878209784,
+    "n_params": 326
+  },
+  {
+    "game": "breakout",
+    "variant": "glue",
+    "gen": 35,
+    "env_steps": 1370816,
+    "pop_mean": 11.988636363636363,
+    "eval": 31.866666666666667,
+    "eval_se": 6.12367597178422,
+    "n_params": 326
+  },
+  {
+    "game": "breakout",
+    "variant": "glue",
+    "gen": 40,
+    "env_steps": 1701536,
+    "pop_mean": 14.045454545454545,
+    "eval": 15.9,
+    "eval_se": 2.0829199589891965,
+    "n_params": 326
+  },
+  {
+    "game": "breakout",
+    "variant": "sparse",
+    "gen": 5,
+    "env_steps": 14260,
+    "pop_mean": 2.602272727272727,
+    "eval": 3.3333333333333335,
+    "eval_se": 0.3810317377662722,
+    "n_params": 2288
+  },
+  {
+    "game": "breakout",
+    "variant": "sparse",
+    "gen": 10,
+    "env_steps": 25344,
+    "pop_mean": 1.7386363636363635,
+    "eval": 2.8333333333333335,
+    "eval_se": 0.20046242836298575,
+    "n_params": 2288
+  },
+  {
+    "game": "breakout",
+    "variant": "sparse",
+    "gen": 15,
+    "env_steps": 37082,
+    "pop_mean": 1.8522727272727273,
+    "eval": 2.7333333333333334,
+    "eval_se": 0.3739677149860023,
+    "n_params": 2288
+  },
+  {
+    "game": "breakout",
+    "variant": "sparse",
+    "gen": 20,
+    "env_steps": 48726,
+    "pop_mean": 2.0454545454545454,
+    "eval": 2.1,
+    "eval_se": 0.2178174567027272,
+    "n_params": 2288
+  },
+  {
+    "game": "breakout",
+    "variant": "sparse",
+    "gen": 25,
+    "env_steps": 61620,
+    "pop_mean": 1.9545454545454546,
+    "eval": 3.8,
+    "eval_se": 0.23758039574940612,
+    "n_params": 2288
+  },
+  {
+    "game": "breakout",
+    "variant": "sparse",
+    "gen": 30,
+    "env_steps": 73696,
+    "pop_mean": 2.0795454545454546,
+    "eval": 3.0,
+    "eval_se": 0.2748737083745107,
+    "n_params": 2288
+  },
+  {
+    "game": "breakout",
+    "variant": "sparse",
+    "gen": 35,
+    "env_steps": 86038,
+    "pop_mean": 2.522727272727273,
+    "eval": 3.533333333333333,
+    "eval_se": 0.42618027832084115,
+    "n_params": 2288
+  },
+  {
+    "game": "breakout",
+    "variant": "sparse",
+    "gen": 40,
+    "env_steps": 98206,
+    "pop_mean": 1.9772727272727273,
+    "eval": 3.3333333333333335,
+    "eval_se": 0.222777085064038,
+    "n_params": 2288
+  },
+  {
+    "game": "breakout",
+    "variant": "holes",
+    "gen": 5,
+    "env_steps": 46226,
+    "pop_mean": 4.8522727272727275,
+    "eval": 13.733333333333333,
+    "eval_se": 2.084830573096653,
+    "n_params": 12752
+  },
+  {
+    "game": "breakout",
+    "variant": "holes",
+    "gen": 10,
+    "env_steps": 68162,
+    "pop_mean": 3.125,
+    "eval": 25.166666666666668,
+    "eval_se": 3.3133009164521963,
+    "n_params": 12752
+  },
+  {
+    "game": "breakout",
+    "variant": "holes",
+    "gen": 15,
+    "env_steps": 94116,
+    "pop_mean": 4.204545454545454,
+    "eval": 3.2666666666666666,
+    "eval_se": 0.5791436845959794,
+    "n_params": 12752
+  },
+  {
+    "game": "breakout",
+    "variant": "holes",
+    "gen": 20,
+    "env_steps": 116164,
+    "pop_mean": 4.1022727272727275,
+    "eval": 6.766666666666667,
+    "eval_se": 1.4934548561665355,
+    "n_params": 12752
+  },
+  {
+    "game": "breakout",
+    "variant": "holes",
+    "gen": 25,
+    "env_steps": 137628,
+    "pop_mean": 4.284090909090909,
+    "eval": 5.966666666666667,
+    "eval_se": 0.8962679824116759,
+    "n_params": 12752
+  },
+  {
+    "game": "breakout",
+    "variant": "holes",
+    "gen": 30,
+    "env_steps": 157656,
+    "pop_mean": 3.6363636363636362,
+    "eval": 6.233333333333333,
+    "eval_se": 0.49818187962348165,
+    "n_params": 12752
+  },
+  {
+    "game": "breakout",
+    "variant": "holes",
+    "gen": 35,
+    "env_steps": 178074,
+    "pop_mean": 3.9204545454545454,
+    "eval": 7.766666666666667,
+    "eval_se": 0.49818187962348165,
+    "n_params": 12752
+  },
+  {
+    "game": "breakout",
+    "variant": "holes",
+    "gen": 40,
+    "env_steps": 196962,
+    "pop_mean": 2.9431818181818183,
+    "eval": 5.3,
+    "eval_se": 0.49475021756213283,
+    "n_params": 12752
+  },
+  {
+    "game": "breakout",
+    "variant": "random",
+    "gen": 5,
+    "env_steps": 4874,
+    "pop_mean": 0.5113636363636364,
+    "eval": 0.43333333333333335,
+    "eval_se": 0.13891110933361772,
+    "n_params": 20550
+  },
+  {
+    "game": "breakout",
+    "variant": "random",
+    "gen": 10,
+    "env_steps": 9908,
+    "pop_mean": 0.45454545454545453,
+    "eval": 0.5333333333333333,
+    "eval_se": 0.1223231906179812,
+    "n_params": 20550
+  },
+  {
+    "game": "breakout",
+    "variant": "random",
+    "gen": 15,
+    "env_steps": 14920,
+    "pop_mean": 0.5,
+    "eval": 0.43333333333333335,
+    "eval_se": 0.10201670161011579,
+    "n_params": 20550
+  },
+  {
+    "game": "breakout",
+    "variant": "random",
+    "gen": 20,
+    "env_steps": 20206,
+    "pop_mean": 0.625,
+    "eval": 0.5333333333333333,
+    "eval_se": 0.15444044759016937,
+    "n_params": 20550
+  },
+  {
+    "game": "breakout",
+    "variant": "random",
+    "gen": 25,
+    "env_steps": 25274,
+    "pop_mean": 0.5681818181818182,
+    "eval": 0.4666666666666667,
+    "eval_se": 0.15444044759016937,
+    "n_params": 20550
+  },
+  {
+    "game": "breakout",
+    "variant": "random",
+    "gen": 30,
+    "env_steps": 30532,
+    "pop_mean": 0.5454545454545454,
+    "eval": 0.5666666666666667,
+    "eval_se": 0.15408030614176732,
+    "n_params": 20550
+  },
+  {
+    "game": "breakout",
+    "variant": "random",
+    "gen": 35,
+    "env_steps": 35926,
+    "pop_mean": 0.6931818181818182,
+    "eval": 0.36666666666666664,
+    "eval_se": 0.0998146430287809,
+    "n_params": 20550
+  },
+  {
+    "game": "breakout",
+    "variant": "random",
+    "gen": 40,
+    "env_steps": 41126,
+    "pop_mean": 0.5568181818181818,
+    "eval": 0.6666666666666666,
+    "eval_se": 0.16555182695279266,
+    "n_params": 20550
+  },
+  {
+    "game": "seaquest",
+    "variant": "glue",
+    "gen": 5,
+    "env_steps": 35634,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 326
+  },
+  {
+    "game": "seaquest",
+    "variant": "glue",
+    "gen": 10,
+    "env_steps": 71669,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 326
+  },
+  {
+    "game": "seaquest",
+    "variant": "glue",
+    "gen": 15,
+    "env_steps": 107313,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 326
+  },
+  {
+    "game": "seaquest",
+    "variant": "glue",
+    "gen": 20,
+    "env_steps": 142907,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 326
+  },
+  {
+    "game": "seaquest",
+    "variant": "glue",
+    "gen": 25,
+    "env_steps": 184513,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 326
+  },
+  {
+    "game": "seaquest",
+    "variant": "glue",
+    "gen": 30,
+    "env_steps": 225365,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 326
+  },
+  {
+    "game": "seaquest",
+    "variant": "glue",
+    "gen": 35,
+    "env_steps": 269220,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 326
+  },
+  {
+    "game": "seaquest",
+    "variant": "glue",
+    "gen": 40,
+    "env_steps": 312365,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 326
+  },
+  {
+    "game": "seaquest",
+    "variant": "sparse",
+    "gen": 5,
+    "env_steps": 36800,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 3688
+  },
+  {
+    "game": "seaquest",
+    "variant": "sparse",
+    "gen": 10,
+    "env_steps": 65881,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 3688
+  },
+  {
+    "game": "seaquest",
+    "variant": "sparse",
+    "gen": 15,
+    "env_steps": 94092,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 3688
+  },
+  {
+    "game": "seaquest",
+    "variant": "sparse",
+    "gen": 20,
+    "env_steps": 125606,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 3688
+  },
+  {
+    "game": "seaquest",
+    "variant": "sparse",
+    "gen": 25,
+    "env_steps": 157337,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 3688
+  },
+  {
+    "game": "seaquest",
+    "variant": "sparse",
+    "gen": 30,
+    "env_steps": 188359,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 3688
+  },
+  {
+    "game": "seaquest",
+    "variant": "sparse",
+    "gen": 35,
+    "env_steps": 226245,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 3688
+  },
+  {
+    "game": "seaquest",
+    "variant": "sparse",
+    "gen": 40,
+    "env_steps": 273319,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 3688
+  },
+  {
+    "game": "seaquest",
+    "variant": "holes",
+    "gen": 5,
+    "env_steps": 40306,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 9144
+  },
+  {
+    "game": "seaquest",
+    "variant": "holes",
+    "gen": 10,
+    "env_steps": 73120,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 9144
+  },
+  {
+    "game": "seaquest",
+    "variant": "holes",
+    "gen": 15,
+    "env_steps": 99136,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 9144
+  },
+  {
+    "game": "seaquest",
+    "variant": "holes",
+    "gen": 20,
+    "env_steps": 119135,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 9144
+  },
+  {
+    "game": "seaquest",
+    "variant": "holes",
+    "gen": 25,
+    "env_steps": 135349,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 9144
+  },
+  {
+    "game": "seaquest",
+    "variant": "holes",
+    "gen": 30,
+    "env_steps": 146664,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 9144
+  },
+  {
+    "game": "seaquest",
+    "variant": "holes",
+    "gen": 35,
+    "env_steps": 156959,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 9144
+  },
+  {
+    "game": "seaquest",
+    "variant": "holes",
+    "gen": 40,
+    "env_steps": 169007,
+    "pop_mean": 0.0,
+    "eval": 0.0,
+    "eval_se": 0.0,
+    "n_params": 9144
+  },
+  {
+    "game": "seaquest",
+    "variant": "random",
+    "gen": 5,
+    "env_steps": 13603,
+    "pop_mean": 0.11363636363636363,
+    "eval": 0.06666666666666667,
+    "eval_se": 0.04554200340426488,
+    "n_params": 26006
+  },
+  {
+    "game": "seaquest",
+    "variant": "random",
+    "gen": 10,
+    "env_steps": 31197,
+    "pop_mean": 0.17045454545454544,
+    "eval": 0.2,
+    "eval_se": 0.08692269873603532,
+    "n_params": 26006
+  },
+  {
+    "game": "seaquest",
+    "variant": "random",
+    "gen": 15,
+    "env_steps": 53684,
+    "pop_mean": 0.22727272727272727,
+    "eval": 0.4666666666666667,
+    "eval_se": 0.14707015206910481,
+    "n_params": 26006
+  },
+  {
+    "game": "seaquest",
+    "variant": "random",
+    "gen": 20,
+    "env_steps": 79929,
+    "pop_mean": 0.26136363636363635,
+    "eval": 0.16666666666666666,
+    "eval_se": 0.06804138174397717,
+    "n_params": 26006
+  },
+  {
+    "game": "seaquest",
+    "variant": "random",
+    "gen": 25,
+    "env_steps": 111078,
+    "pop_mean": 0.2840909090909091,
+    "eval": 0.4666666666666667,
+    "eval_se": 0.16147468555186617,
+    "n_params": 26006
+  },
+  {
+    "game": "seaquest",
+    "variant": "random",
+    "gen": 30,
+    "env_steps": 148886,
+    "pop_mean": 0.2727272727272727,
+    "eval": 0.3333333333333333,
+    "eval_se": 0.10886621079036346,
+    "n_params": 26006
+  },
+  {
+    "game": "seaquest",
+    "variant": "random",
+    "gen": 35,
+    "env_steps": 188372,
+    "pop_mean": 0.4659090909090909,
+    "eval": 0.26666666666666666,
+    "eval_se": 0.0807373427759331,
+    "n_params": 26006
+  },
+  {
+    "game": "seaquest",
+    "variant": "random",
+    "gen": 40,
+    "env_steps": 233940,
+    "pop_mean": 0.29545454545454547,
+    "eval": 0.6,
+    "eval_se": 0.18012341448141725,
+    "n_params": 26006
+  }
+]

@@ -1,0 +1,50 @@
+[
+  {
+    "file": "qwen38_thinking112k_alone_breakout.txt",
+    "tokens": 114688,
+    "finish": "length",
+    "max_tokens": 114688,
+    "thinking": true,
+    "force_final": false
+  },
+  {
+    "file": "qwen38_thinking112k_compiler_breakout.txt",
+    "tokens": 63544,
+    "finish": "stop",
+    "max_tokens": 114688,
+    "thinking": true,
+    "force_final": false
+  },
+  {
+    "file": "qwen38_thinking112k_alone_seaquest.txt",
+    "tokens": 51609,
+    "finish": "stop",
+    "max_tokens": 114688,
+    "thinking": true,
+    "force_final": false
+  },
+  {
+    "file": "qwen38_thinking112k_compiler_seaquest.txt",
+    "tokens": 50641,
+    "finish": "stop",
+    "max_tokens": 114688,
+    "thinking": true,
+    "force_final": false
+  },
+  {
+    "file": "qwen38_thinking112k_alone_asterix.txt",
+    "tokens": 74894,
+    "finish": "stop",
+    "max_tokens": 114688,
+    "thinking": true,
+    "force_final": false
+  },
+  {
+    "file": "qwen38_thinking112k_compiler_asterix.txt",
+    "tokens": 43374,
+    "finish": "stop",
+    "max_tokens": 114688,
+    "thinking": true,
+    "force_final": false
+  }
+]

@@ -1,0 +1,338 @@
+```python
+import numpy as np
+
+
+def build_policy():
+    # 600 -> 32 -> 32 -> 6, tanh on hidden layers.
+    # Input is seaquest_obs(s).reshape(-1), row-major:
+    # index = (y * 10 + x) * 6 + c
+    #
+    # This is a hand-written heuristic policy:
+    # - infer sub position from channel 0
+    # - infer oxygen/diver gauge from channel 5
+    # - use global threat/diver directional sums to bias movement
+    # - prefer surfacing when oxygen is low or at the surface
+    # - otherwise patrol horizontally and vertically, with occasional firing
+    #
+    # The weights are deliberately sparse and scaled so that tanh remains
+    # mostly in a useful range for the features used.
+
+    in_dim = 600
+    h1_dim = 32
+    h2_dim = 32
+    out_dim = 6
+
+    W1 = np.zeros((in_dim, h1_dim), dtype=np.float32)
+    b1 = np.zeros(h1_dim, dtype=np.float32)
+    W2 = np.zeros((h1_dim, h2_dim), dtype=np.float32)
+    b2 = np.zeros(h2_dim, dtype=np.float32)
+    W3 = np.zeros((h2_dim, out_dim), dtype=np.float32)
+    b3 = np.zeros(out_dim, dtype=np.float32)
+
+    def idx(y, x, c):
+        return (y * 10 + x) * 6 + c
+
+    # ------------------------------------------------------------------
+    # Hidden layer 1: raw observable features.
+    # ------------------------------------------------------------------
+
+    # h0: approximate sub_x. Channel 0 contains front and back cells.
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 0), 0] += 0.05 * x
+
+    # h1: approximate sub_y.
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 0), 1] += 0.05 * y
+
+    # h2: oxygen/diver gauge total on row 9, channel 5.
+    for x in range(10):
+        W1[idx(9, x, 5), 2] += 0.10
+
+    # h3: total enemy pressure: fish/subs/bullets.
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 1), 3] += 0.02
+
+    # h4: diver/enemy mixed count.
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 2), 4] += 0.02
+
+    # h5: left-side enemy pressure.
+    for y in range(10):
+        for x in range(5):
+            W1[idx(y, x, 1), 5] += 0.03
+
+    # h6: right-side enemy pressure.
+    for y in range(10):
+        for x in range(5, 10):
+            W1[idx(y, x, 1), 6] += 0.03
+
+    # h7: upper enemy pressure.
+    for y in range(5):
+        for x in range(10):
+            W1[idx(y, x, 1), 7] += 0.03
+
+    # h8: lower enemy pressure.
+    for y in range(5, 10):
+        for x in range(10):
+            W1[idx(y, x, 1), 8] += 0.03
+
+    # h9: left-side diver/enemy mixed pressure.
+    for y in range(10):
+        for x in range(5):
+            W1[idx(y, x, 2), 9] += 0.03
+
+    # h10: right-side diver/enemy mixed pressure.
+    for y in range(10):
+        for x in range(5, 10):
+            W1[idx(y, x, 2), 10] += 0.03
+
+    # h11: upper diver/enemy mixed pressure.
+    for y in range(5):
+        for x in range(10):
+            W1[idx(y, x, 2), 11] += 0.03
+
+    # h12: lower diver/enemy mixed pressure.
+    for y in range(5, 10):
+        for x in range(10):
+            W1[idx(y, x, 2), 12] += 0.03
+
+    # h13: surface indicator: sub channel in row 0.
+    for x in range(10):
+        W1[idx(0, x, 0), 13] += 0.25
+
+    # h14: friendly bullet presence.
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 3), 14] += 0.02
+
+    # h15: trail/back presence, useful for motion context.
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 4), 15] += 0.01
+
+    # h16: center-column enemy pressure.
+    for y in range(10):
+        for x in range(3, 7):
+            W1[idx(y, x, 1), 16] += 0.03
+
+    # h17: center-column diver/enemy mixed pressure.
+    for y in range(10):
+        for x in range(3, 7):
+            W1[idx(y, x, 2), 17] += 0.03
+
+    # h18: left-edge enemy pressure.
+    for y in range(10):
+        for x in range(2):
+            W1[idx(y, x, 1), 18] += 0.04
+
+    # h19: right-edge enemy pressure.
+    for y in range(10):
+        for x in range(8, 10):
+            W1[idx(y, x, 1), 19] += 0.04
+
+    # h20: left-edge diver/enemy mixed pressure.
+    for y in range(10):
+        for x in range(2):
+            W1[idx(y, x, 2), 20] += 0.04
+
+    # h21: right-edge diver/enemy mixed pressure.
+    for y in range(10):
+        for x in range(8, 10):
+            W1[idx(y, x, 2), 21] += 0.04
+
+    # h22: oxygen gauge left half.
+    for x in range(5):
+        W1[idx(9, x, 5), 22] += 0.10
+
+    # h23: oxygen/diver gauge right half.
+    for x in range(5, 10):
+        W1[idx(9, x, 5), 23] += 0.10
+
+    # h24: total sub channel mass, sanity/position confidence.
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 0), 24] += 0.05
+
+    # h25: enemy bullet channel only, via channel 1 minus fish/sub? We cannot
+    # subtract in one linear unit, but channel 1 already includes bullets.
+    # Use a slightly different scale to create a separate feature.
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 1), 25] += 0.01
+
+    # h26: diver/enemy channel only, separate scale.
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 2), 26] += 0.01
+
+    # h27: upper-left quadrant enemy pressure.
+    for y in range(5):
+        for x in range(5):
+            W1[idx(y, x, 1), 27] += 0.03
+
+    # h28: upper-right quadrant enemy pressure.
+    for y in range(5):
+        for x in range(5, 10):
+            W1[idx(y, x, 1), 28] += 0.03
+
+    # h29: lower-left quadrant enemy pressure.
+    for y in range(5, 10):
+        for x in range(5):
+            W1[idx(y, x, 1), 29] += 0.03
+
+    # h30: lower-right quadrant enemy pressure.
+    for y in range(5, 10):
+        for x in range(5, 10):
+            W1[idx(y, x, 1), 30] += 0.03
+
+    # h31: lower diver/enemy mixed pressure, stronger for diving.
+    for y in range(5, 10):
+        for x in range(10):
+            W1[idx(y, x, 2), 31] += 0.04
+
+    # Small biases to keep features centered.
+    b1[0] = -0.25   # sub_x center around 5
+    b1[1] = -0.20   # sub_y center around 4
+    b1[2] = -0.50   # oxygen gauge often high
+    b1[3] = 0.0
+    b1[4] = 0.0
+    b1[13] = -0.20  # surface indicator
+    b1[24] = -0.10  # sub mass
+
+    # ------------------------------------------------------------------
+    # Hidden layer 2: policy features.
+    # ------------------------------------------------------------------
+
+    # h2_0: horizontal patrol: go right if sub_x is left of center.
+    W2[0, 0] = -1.20  # sub_x
+    b2[0] = 0.60      # center bias
+
+    # h2_1: horizontal patrol: go left if sub_x is right of center.
+    W2[0, 1] = 1.20
+    b2[1] = -0.60
+
+    # h2_2: vertical dive: go down if sub_y is low and oxygen is high.
+    W2[1, 2] = -1.00  # sub_y
+    W2[2, 2] = 0.80   # oxygen
+    b2[2] = -0.20
+
+    # h2_3: vertical return: go up if sub_y is high or oxygen is low.
+    W2[1, 3] = 1.00
+    W2[2, 3] = -0.90
+    b2[3] = 0.10
+
+    # h2_4: surface/no-op preference when at surface or oxygen low.
+    W2[13, 4] = 1.50  # surface indicator
+    W2[2, 4] = -0.80  # low oxygen
+    b2[4] = 0.20
+
+    # h2_5: avoid moving right if right-side threats are high.
+    W2[6, 5] = -1.20  # right threat
+    W2[19, 5] = -0.80 # right edge threat
+    b2[5] = 0.10
+
+    # h2_6: avoid moving left if left-side threats are high.
+    W2[5, 6] = -1.20
+    W2[18, 6] = -0.80
+    b2[6] = 0.10
+
+    # h2_7: avoid moving up if upper threats are high.
+    W2[7, 7] = -1.20
+    W2[27, 7] = -0.60
+    W2[28, 7] = -0.60
+    b2[7] = 0.10
+
+    # h2_8: avoid moving down if lower threats are high.
+    W2[8, 8] = -1.20
+    W2[29, 8] = -0.60
+    W2[30, 8] = -0.60
+    b2[8] = 0.10
+
+    # h2_9: seek divers on the left.
+    W2[9, 9] = 1.00
+    W2[20, 9] = 0.80
+    W2[5, 9] = -0.70  # but not if left threats
+    b2[9] = -0.10
+
+    # h2_10: seek divers on the right.
+    W2[10, 10] = 1.00
+    W2[21, 10] = 0.80
+    W2[6, 10] = -0.70
+    b2[10] = -0.10
+
+    # h2_11: seek divers above.
+    W2[11, 11] = 1.00
+    W2[7, 11] = -0.70
+    b2[11] = -0.10
+
+    # h2_12: seek divers below.
+    W2[12, 12] = 1.00
+    W2[31, 12] = 0.80
+    W2[8, 12] = -0.70
+    b2[12] = -0.10
+
+    # h2_13: fire when there is enemy pressure and we are not at surface.
+    W2[3, 13] = 1.20
+    W2[16, 13] = 0.80
+    W2[13, 13] = -1.00
+    b2[13] = -0.20
+
+    # h2_14: fire more when center-column enemies are present.
+    W2[16, 14] = 1.20
+    W2[3, 14] = 0.80
+    W2[13, 14] = -0.80
+    b2[14] = -0.30
+
+    # h2_15: no-op when safe and at surface.
+    W2[13, 15] = 1.50
+    W2[2, 15] = -0.50
+    b2[15] = 0.30
+
+    # h2_16: no-op when oxygen is very low and not at surface.
+    W2[2, 16] = -1.20
+    W2[1, 16] = -0.50
+    b2[16] = 0.20
+
+    # h2_17: move away from left-edge threats.
+    W2[18, 17] = 1.00
+    W2[5, 17] = -0.50
+    b2[17] = -0.10
+
+    # h2_18: move away from right-edge threats.
+    W2[19, 18] = 1.00
+    W2[6, 18] = -0.50
+    b2[18] = -0.10
+
+    # h2_19: move away from upper threats.
+    W2[7, 19] = 1.00
+    W2[27, 19] = 0.50
+    W2[28, 19] = 0.50
+    b2[19] = -0.10
+
+    # h2_20: move away from lower threats.
+    W2[8, 20] = 1.00
+    W2[29, 20] = 0.50
+    W2[30, 20] = 0.50
+    b2[20] = -0.10
+
+    # h2_21: general danger: prefer no-op/fire over movement.
+    W2[3, 21] = 1.00
+    W2[25, 21] = 0.80
+    b2[21] = -0.20
+
+    # h2_22: diver opportunity: prefer movement toward divers.
+    W2[4, 22] = 1.00
+    W2[26, 22] = 0.80
+    W2[3, 22] = -0.50
+    b2[22] = -0.20
+
+    # h2_23: oxygen urgency: prefer up/surface.
+    W2[2, 23] = -1.20
+    b2[23] = 0.20
+
+    # h2_24: sub position confidence.
+    W2[24

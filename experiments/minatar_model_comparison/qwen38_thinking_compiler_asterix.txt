@@ -1,0 +1,150 @@
+We need answer user's request. Need design policy from scratch, no training, no forward pass, no rollouts, no feedback, no code execution. Output complete Python function build_policy() returns ExecutableMLP architecture 600 -> 32 -> 32 -> 6 tanh. Use NeuralCompiler IR and backend. Single attempt without testing. Need provide one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program). Need think deeply.
+
+We need produce code only? User: "Output a complete Python function build_policy() ... Return one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program). Do not train, test, run model forward passes or use feedback." So final should be code block only likely. Need ensure code valid given IR/backend. Need design policy for AsterixEnv.
+
+Let's understand environment.
+
+AsterixEnv: 10x10 grid. Player at (x,y) with x horizontal 0..9, y vertical 1..8? reset y=5, movement u max(1,y-1), d min(8,y+1), so y in 1..8. Entities: 8 slots, each [x, y, lr, is_gold]. lr True means moving left? In act: x[0] += 1 if x[2] else -1. If x[2] true, x increases (right). But spawn: lr = random <0.5; x=0 if lr else 9. If lr true, spawn at x=0 and move right? They call lr maybe left-to-right. So x[2] True = moving right. is_gold True = gold (reward +1 if collide), else enemy (terminal). Trail channel: state[x[1], back_x, 2] where back_x = x[0]-1 if x[2] else x[0]+1. If moving right (x[2]=True), back_x = x-1 (behind left). If moving left, back_x=x+1 (behind right). So trail is cell behind entity.
+
+Observation wrapper: obs 10x10x6 float32:
+channel 0 = player
+channel 1 = enemy
+channel 2 = gold
+channel 3 = unused? Actually obs[:,:,4] = s[:,:,2] trail. So channels: 0 player, 1 enemy, 2 gold, 3 zero, 4 trail. Channel 5 zero. Input dim 600 row-major: index = (r*10 + c)*6 + ch, where r=y, c=x.
+
+Actions: 0 no-op, 1 left, 2 up, 3 right, 4 down, 5 fire. But environment act ignores fire? It maps 'f' but no effect except spawn/move timers. Fire no effect. So avoid fire.
+
+Need policy network 600->32->32->6. Only 32 hidden units each layer. Need design symbolic circuit within 32 H1 and 32 H2. Need output logits. Actions sampled softmax; with prob 0.1 previous action repeated (external? likely policy wrapper repeats previous action with prob 0.1; network just outputs logits). Need robust simple policy.
+
+We need use IR. We can define H1 units (max 32) and H2 units (max 32). Need output rules. Need compile. Need no testing. Need ensure dimensions. Need choose policy.
+
+Game: entities spawn from left/right at y=slot+1 (slots 0..7 => y=1..8). Move horizontally every move_speed steps (initial 5, ramp down to 1). Spawn every spawn_speed steps (initial 10, ramp down to 1). Gold 1/3, enemy 2/3. Player can move vertically 1..8 and horizontally 0..9. Collision if player moves into entity or entity moves into player. Reward +1 for gold, terminal for enemy. Need survive and collect gold. Simple policy: avoid enemies, seek gold? With limited units, maybe just vertical avoidance of nearest enemy? Or move to center? Need maximize reward? The prompt just design policy, not necessarily optimal. But likely evaluated? Need make reasonable.
+
+Constraints: 32 H1, 32 H2. Need compute features from 600 input. H1 can be threshold/RAW linear combos. H2 combine H1. Output combine H2.
+
+Need think of feasible circuit.
+
+Observation channels: player, enemy, gold, trail. We can detect presence of enemy/gold in rows/columns, distances maybe. H1 units can be linear weighted sums over input. With 32 H1, can create detectors for each row? 8 rows (y=1..8) enemy presence, gold presence, maybe trail. Also player row? Player position known? Network sees player channel. Could detect player row/col. But 32 units limited.
+
+Simplest policy: always move up/down away from nearest enemy in same row? But enemies move horizontally; if in same row, danger. Could move vertically to row with no enemy/gold? Need avoid terminal. Maybe choose action based on enemy in current row: if enemy left, move right? But if enemy approaching, moving horizontally may not help; vertical safer. Could move up/down to row without enemy. Need know rows.
+
+Could implement: detect enemy in each row (8 H1). Detect gold in each row (8 H1). Detect player row? Maybe 8 H1. Total 24. Then H2 choose target row: prefer row with gold and no enemy, else row with no enemy, else current row. But output actions need move up/down/left/right. Need compare target row to player row. Could use H2 units for each row? 32 H2. Maybe output logits: for each row above/below, score. But only 6 actions.
+
+Alternative: Use H1 to compute signed vertical distance to nearest gold/enemy? H1 can be weighted sums with row weights. For each channel, compute row coordinate of first/nearest? But linear threshold can't easily find nearest without many units. Could use row presence and player row.
+
+Maybe simpler: policy that moves to center (y=5) and avoids immediate enemy in same row by moving up/down. Since player y limited 1..8. Center safe? Enemies spawn all rows. But can avoid.
+
+Need output logits. We can set biases to favor no-op or center. Use H2 to adjust.
+
+Could design a heuristic:
+- If enemy in current row and closer from left, move right? But vertical maybe.
+- If enemy in current row, move up if enemy in lower? Hmm.
+
+Maybe use trail channel to predict enemy positions? Trail behind entity indicates direction. Could avoid by moving opposite? But limited.
+
+Maybe best simple: always move vertically toward row with gold if no enemy, else away from enemy. But need implement with 32 units.
+
+Let's inspect IR capabilities. H1 THRESHOLD: h1 = tanh(gain*(sum w_i x_i - threshold)). Input x are 0/1 mostly. We can set weights to count entities in row/col. For row enemy presence: weights +1 for all enemy cells in row, threshold 0.5, gain 10 => +1 if any enemy in row. For row gold presence similarly. For player row: weights +1 for player cells in row, threshold 0.5. But player is one cell; row detector works.
+
+H1 RAW can compute linear combination without threshold, e.g., row coordinate weighted sum: sum row_index * player_channel over all cells. Since player one-hot, gives player_y. But tanh of that? RAW h1 = tanh(sum w x + bias). If weights row index, output tanh(y) not linear. Could use threshold? We need numeric comparisons. H2 can combine H1 signals. But H1 outputs tanh saturated if gain high. For coordinate, maybe use RAW with small gain? H1 RAW applies tanh to raw sum. If sum y (1..8), tanh(5) ~1, not useful. Could scale weights small e.g. 0.1*y, tanh(0.5) ~0.46, but H2 linear can use approximate. But thresholds in H2? H2 only tanh linear combination of H1, no threshold except bias. Could compare approximate coordinates if scaled. But precision limited.
+
+Maybe avoid coordinate numeric; use row detectors and player row detectors to make relative comparisons. For each row r, H1 enemy_r, gold_r, player_r. H2 can compute target row indicators: e.g., row r is safe if not enemy_r. row r is gold if gold_r. Need choose nearest safe/gold row to player. Could create H2 units for "move up" if there is a safe row above player, "move down" if safe row below. But need know above/below relative to player. Could use H1 player row and row detectors. H2 can combine: for each row r, indicator row_r AND player_above? Need AND of H1 signals. H2 can do linear combination with bias to approximate AND/OR. Since H1 are ±1. We can use H2 gates.
+
+But H2 only one layer after H1. We can create H2 units that are logical functions of H1. Output can combine H2.
+
+Maybe use H1 units for each row: enemy_r, gold_r, player_r. That's 24. H1 remaining 8 for maybe column? H2 32.
+
+H2 can compute:
+- safe_above: OR over rows r < player_row of (not enemy_r). But player_row variable. Need condition row r is above player: player_row > r. Could detect player in rows > r. We can create H1 player_below_r? For each r, detector if player row > r (i.e., any player in rows r+1..8). That's 8 H1. Similarly player_above_r. But limited.
+
+Alternative: Use H1 row coordinate approximate and H2 compare. Maybe easier: H1 player_y_scaled = tanh(0.1*player_y) (RAW). H1 enemy_row_min? Could compute weighted sum of enemy rows with small weights? But multiple enemies. H1 enemy_y_mean = tanh(0.1*sum enemy_y) maybe. Not robust.
+
+Maybe use H1 to compute vertical distance to nearest enemy? Hard.
+
+Could design policy not needing player row: use global row danger and move to a fixed safe row? For example, always move up if any enemy in lower half? But need know current row to avoid moving out of bounds. Could use player row detectors.
+
+Maybe simpler: Use player row detectors (8 H1) and enemy row detectors (8 H1). H2 can output move up/down based on enemy in current row and adjacent rows. For each possible player row p, create H2 unit "danger_p" = enemy_p AND player_p. But H2 can approximate AND: h2 = tanh(0.5*(enemy_p + player_p) - 0.5?) Let's derive. H1 ±1. AND true if both +1. Linear: z = 0.5*(a+b) - 0.5? If a=b=1 => 0.5? tanh small. Better use high gain? H2 no gain param but weights can be large. z = 2*(a+b) - 3? If both 1 =>1, else -1 or -3. tanh saturates. So H2 AND: terms {a:2,b:2}, bias -3. OR: z = 2*(a+b) -1? If any 1 =>1, both -1 => -3. NOT: z = -a. We can use H2 gates.
+
+But H2 units limited. Could create for each player row p: danger_p = AND(enemy_p, player_p) (8 H2). Then if danger, move up/down. Need choose direction. Could use enemy position left/right? Need column detectors. Or move to row with no enemy. Could use safe row above/below.
+
+Maybe create H2 units for each row r: safe_r = NOT enemy_r (8). gold_r = gold_r (8). player_r (8 H1). Need choose target row. Could output move up if there exists safe row above player, else down. To know above, need player row. Could create H2 units for each p: above_safe_p = OR_{r<p} safe_r AND player_p. That's many (28) but H2 only 32. Could maybe compute with H1 player_above_r? Let's allocate H1 differently.
+
+H1 32:
+- enemy_r 8
+- gold_r 8
+- player_r 8
+- player_above_r? 8? total 32. player_above_r = player in rows > r? Or below. Then H2 can compute for each r: safe_above_r = safe_r AND player_above_r? But need OR over r. Could output move_up = OR over r of (safe_r AND player_above_r). H2 can OR many H2? But H2 only one layer; output can combine H2. We can create H2 units for each r: candidate_up_r = AND(safe_r, player_above_r) (8). Then output move_up = OR of candidate_up_r (can be output rule with positive weights and bias to OR). Similarly candidate_down_r = AND(safe_r, player_below_r) (8). Need player_below_r H1 (8) instead of player_r? But also need maybe current row danger. Total H1: enemy 8, gold 8, player_above 8, player_below 8 =32. No player_r. But player_above_r for r=0? rows >0 always true? player_below_r for r=7? rows <7? Need define.
+
+If player at row p, player_above_r = 1 if p > r (there is player in rows r+1..8). player_below_r = 1 if p < r (player in rows 0..r-1). For r=0, player_above_0 = p>0 always (since p>=1) => +1. For r=7, player_below_7 = p<7 maybe false if p=7/8? Actually rows 1..8, r index 0..9? We only care rows 1..8 (indices 1..8). Could use 8 rows y=1..8. Let r=1..8. player_above_r = p > r. For r=1, p>1; for r=8 false. player_below_r = p < r. For r=1 false; r=8 p<8.
+
+Then candidate_up_r = safe_r AND player_above_r means row r is safe and above player. If any, move up. candidate_down_r = safe_r AND player_below_r. If any, move down. If both? choose maybe gold. If no safe above/below? all rows unsafe? Then maybe no-op or move horizontally? But there are 8 rows, max 8 entities, could all rows have enemy. Then any vertical move may be into enemy row? But if current row has enemy, terminal maybe. Could move horizontally? Hard.
+
+Need also seek gold. Could modify safe_r to prefer gold: target_r = (not enemy_r) AND (gold_r OR maybe safe). For move up/down, choose gold row if available, else safe row. Could create H2 candidate_gold_up_r = AND(gold_r, player_above_r, not enemy_r). But 3-way AND in H2 possible with weights. Then output move_up if any gold_up or safe_up. But if gold row unsafe, avoid.
+
+H2 units: candidate_up_safe_r 8, candidate_down_safe_r 8, candidate_up_gold_r 8, candidate_down_gold_r 8 =32. Then output rules: action up = OR of gold_up and safe_up? But if both up and down, need choose. Could bias. Maybe output up if any up candidate, down if any down candidate, with up priority? But if both, softmax may split. Could set up weight higher. Or use H2 to compute no_up? Not enough.
+
+But H2 units all used. Output can combine H2 directly. We can set action 2 (up) terms: all up candidates positive, maybe gold_up higher. action 4 (down): down candidates. action 0 no-op bias high. If no candidates, no-op. If both up and down, both logits high; maybe choose based on bias or gold. Could add bias to up/down? Maybe prefer up? But if player at top, no up candidates, down. At bottom, up. Good.
+
+Need ensure H1 detectors. H1 enemy_r: threshold sum enemy channel in row r >0.5. Use add_spatial_coord_extractor? It returns mapping for channel with col_weights. For row presence, col_weights all 1. row_filter [r]. channel 1. threshold 0.5 gain 10.
+Gold_r channel 2.
+player_above_r: need player in rows > r. row_filter list(range(r+1,9))? If rows 0..9 but player only 1..8. For r from 1 to 8? We can use 8 rows y=1..8. Let's index r=1..8. For player_above_r: rows r+1..8. If empty, weights empty => h1 = tanh(-threshold*gain) = -1 if threshold 0.5. Good. For r=8, no rows => -1. For player_below_r: rows 1..r-1. For r=1 empty => -1.
+But H1 threshold with empty input_weights: sum=0, threshold 0.5 => -1. Good.
+Need H1 count 8+8+8+8=32 exactly.
+
+H2 candidate units: Need AND of H1 signals. H1 outputs approx ±1. Use add_h2_gate with terms and bias. For AND of A and B: z = 2A + 2B - 3. If A=B=1 =>1; if one 1 one -1 => -1; both -1 => -3. tanh saturates. For 3-way AND A,B,C: z = 3A+3B+3C - 6? If all 1 =>3; if two 1 one -1 =>0; if one 1 two -1 => -3; all -1 => -6. tanh(0)=0 not saturated. Need stronger: weights 4 each, bias -10? all 1 =>2; two 1 one -1 => -2; good. Use 4, bias -10. Or use formula: z = k*(sum - (n-1))? For n=3, want all 1 positive, else negative. sum in {-3,-1,1,3}. threshold 2? z = sum - 2: all 1 =>1, two 1 => -1. So terms weight 1 each, bias -2. But tanh(1)=0.76, tanh(-1)=-0.76 okay. For stronger, weight 2 each, bias -4: all 1=>2, two=>-2. Good. Use 2, bias -4. For 2-way: weight 2, bias -3? sum { -2,0,2}; threshold 1? z = sum -1? all 1=>1, one=>-1. Use weight 2 each, bias -3 gives all 1=>1, one=>-1, both -1=>-3. Good.
+
+But H2 gate uses tanh. We can use add_h2_gate(name, {A:2,B:2}, bias=-3). For 3-way: {A:2,B:2,C:2}, bias=-4? all 1 => 6-4=2; two 1 one -1 =>4-4=0 (bad). Need bias -5? all 1=>1, two=>-1. Use weight 2, bias -5. Or weight 3, bias -7: all 1=>2, two=>-1. Use 3, bias -7. Let's choose robust: 2-way: w=3, bias=-5? all 1=>1, one=>-2, both -1=>-5. Good. 3-way: w=3, bias=-7? all 1=>2, two=>-1, one=>-4. Good. Use these.
+
+But H1 signals may not be exactly ±1 due to tanh saturation with gain 10. For presence detectors, if count 1, z=10*(1-0.5)=5 => tanh 0.9999. If count 0, z=-5 => -0.9999. Good. Empty player_above threshold 0.5 => -0.9999. Good.
+
+H2 candidate_up_gold_r = AND(gold_r, not enemy_r, player_above_r). Need NOT enemy_r. We don't have H1 not_enemy. Could use enemy_r with negative weight in AND? For condition enemy_r = -1. 3-way AND of gold_r (+1), enemy_r (-1), player_above_r (+1). We can create H2 with terms: gold_r:3, enemy_r:-3, player_above_r:3, bias? Need output positive when gold=1, enemy=-1, above=1. Sum = 3 -3 +3 =3. Need threshold maybe 2. If gold=1, enemy=1, above=1 => 3+3+3=9 (bad positive). Need more complex. Could use safe_r H2 = NOT enemy_r, then AND with gold and above. But H2 cannot feed H2 (only H1 to H2). So need 3-way condition with enemy negative. We can design linear function that is positive only for (gold=1, enemy=-1, above=1). Variables ±1. Need weights a for gold, b for enemy, c for above, bias d. Desired:
+G=1,E=-1,A=1 => positive.
+Other combos negative ideally.
+Let's solve. Let variables. We can use product? Not possible. Linear separability? The target is one of 8 corners. Any single corner is linearly separable. Choose weights equal to target vector, bias = - (n-1)? For target t=(1,-1,1), z = t·x - 2? If x=t => 3-2=1. For any other corner, dot <=1? Let's check x=(1,1,1): dot=1-1+1=1 => -1. x=(1,-1,-1): dot=1+1-1=1 => -1. x=(-1,-1,1): -1+1+1=1 => -1. x=(1,1,-1):1-1-1=-1 => -3. etc. So z = x_g - x_e + x_a - 2 works. Use weights 3? z = 3G -3E +3A -6? target: 3+3+3-6=3; others max? (1,1,1):3-3+3-6=-3; (1,-1,-1):3+3-3-6=-3; (-1,-1,1):-3+3+3-6=-3. Good. So 3-way safe-gold-above: terms gold:3, enemy:-3, above:3, bias=-6.
+Similarly safe-gold-below: gold:3, enemy:-3, below:3, bias=-6.
+For safe (no gold) candidate: condition enemy=-1, above=1 (gold irrelevant). Need positive when E=-1,A=1 regardless G. Variables E,A. z = -E + A -? If E=-1,A=1 =>2. Need threshold 1: z = -E + A -1 =>1. If E=1,A=1 => -1; E=-1,A=-1 => -3; E=1,A=-1=>-3. Use weights -3 for enemy, 3 for above, bias -3? target: 3+3-3=3; E=1,A=1: -3+3-3=-3; good. So safe_up_r: enemy_r:-3, player_above_r:3, bias=-3. Gold irrelevant. But this will also be positive for gold rows; that's okay, up candidate. For down: enemy:-3, below:3, bias=-3.
+
+Then H2 units:
+For r=1..8:
+- up_safe_r: terms {enemy_r: -3, above_r: 3}, bias -3.
+- down_safe_r: {enemy_r: -3, below_r: 3}, bias -3.
+- up_gold_r: {gold_r:3, enemy_r:-3, above_r:3}, bias -6.
+- down_gold_r: {gold_r:3, enemy_r:-3, below_r:3}, bias -6.
+Total 32.
+
+Output rules:
+Action 2 up: terms all up_safe_r maybe weight 1, all up_gold_r weight 2? bias maybe -? Need OR. H2 outputs ±1. If any up candidate +1, sum positive. If none, all -1, sum negative. With 16 terms, if one +1 and 15 -1, sum = -14 plus weights. Need bias to make positive if any. For OR of N signals: z = sum w_i h_i - (N-1)*w? If all -1 => -N*w - bias? Let's design. If weights 1 for 16 signals, want any +1 => positive, all -1 => negative. Sum ranges -16 to 16. Threshold 0: if one +1, 14 -1 => -14 negative. Need bias +14? z = sum +14: all -1 =>0 (tanh 0), one +1 =>16 positive. But all -1 zero not negative. Use bias +13: all -1 => -1, one +1 =>15. Good. For weighted gold 2, safe 1: N weights sum W=8*2+8*1=24. All -1 sum=-24. Need bias W-1=23 => all -1=-1, one safe +1: -22+23=1, one gold +1: -20+23=3. Good. So up rule: h2_terms all up_gold weight 2, up_safe weight 1, bias 23.
+Down similarly bias 23.
+No-op action 0: maybe bias high, e.g., 5. But if up/down candidates, their logits maybe 1-3 after tanh? Wait output logits are linear combination of H2 (tanh outputs) + bias. H2 outputs ~±1. Up logit with one candidate: z=1 or 3, tanh? No output no activation, logits = sum + bias. If bias 23 and one safe: 1? Actually H2 values: candidate +1, others -1. Sum weighted = 23? Let's compute W=24, all -1 sum=-24, bias 23 => -1. If one safe +1 instead of -1 increases by 2 => +1. If one gold +1 increases by 4 => +3. So up logit ~1 or 3. No-op bias 5 would dominate, bad. Need no-op lower, maybe -5 or 0. But if no candidates, up/down logits -1. We want no-op. Set no-op bias 0? Then no-op 0 > -1. If candidate, up 1 or 3 > 0. Good. But other actions default 0? If no output rule, b3 default 0. Then no-op 0, left/right/fire 0. If no candidate, all actions 0 except up/down -1, softmax uniform over 0,1,3,4,5? Actually no-op, left, right, fire all 0. Not ideal. We can set biases for undesired actions negative. output_bias can set all actions negative, then output rules override? In backend: if prog.output_bias is not None: b3[:] = np.array(output_bias). Then for each rule, if "bias" in rule: b3[act_idx] = rule["bias"] (overwrites). If rule no bias, uses output_bias. We can set output_bias = [-10, -10, -10, -10, -10, -10] maybe. Then set no-op rule bias 0? But if we set no-op rule with bias 0, b3[0]=0. Up/down rules bias 23. Left/right/fire remain -10. Good. If no candidate, no-op 0, up/down -1, others -10 => no-op. If candidate, up/down positive. Good.
+
+But if both up and down candidates, both logits positive. Which chosen? Could be split. Need priority. Maybe set up bias slightly higher? But if down candidate only, down logit 1, up -1. If both, up maybe 1, down 1. Could add bias to up +1? But then if down only, down 1, up -1, okay. If both, up 2, down 1. But if up candidate weak safe (1) and down gold (3), up 2, down 3 => down. Good. Could set up bias 24 instead of 23? Then no candidate up 0, no-op 0 tie. Maybe no-op bias 1? Let's design.
+
+Set output_bias all -10. No-op rule bias 1. Up rule bias 23? no candidate up -1, no-op 1. one safe up 1, tie no-op? Actually up logit 1, no-op 1. Could be tie. Use up bias 24: no candidate 0, no-op 1; one safe 2, no-op 1; one gold 4. Down bias 23? no candidate -1, one safe 1, no-op 1 tie. Use down bias 24 too? no candidate 0, one safe 2. Then both symmetric. If both, tie. Could add small priority: up bias 25, down bias 24. No candidate up 1, down 0, no-op 1? Up 1 tie no-op. Need no-op lower maybe 0. Let's set no-op bias 0. output_bias others -10. Up bias 25: no candidate 1, one safe 3, one gold 5. Down bias 24: no candidate 0, one safe 2, one gold 4. Then if no candidate, up 1 > no-op 0, bad. Need no candidate negative. For up bias W-1=23 gives no candidate -1. To add priority, up bias 24 gives no candidate 0. Could set no-op bias 1. Then no candidate up 0 <1. one safe up 2 >1. Down bias 23 no candidate -1, one safe 1 tie no-op. Use down bias 24 no candidate 0, one safe 2. So no-op bias 1, up bias 24, down bias 24. No candidate: up 0, down 0, no-op 1. one safe: up/down 2 >1. one gold: 4. Both safe: up 2, down 2 tie. Could add up bias 25? no candidate up 1 tie no-op. no-op 2? one safe up 3, down 2? Let's solve: W=24. logit = sum + bias. no candidate sum=-24. Want no candidate < no-op. one safe sum=-22. Want > no-op. So no-op bias B0 must satisfy -24 + B_up < B0 < -22 + B_up. Interval length 2. Choose B_up=24 => no cand 0, one safe 2. B0=1 works. For down B_down=24 same. Both tie. To prioritize up, B_up=25 => no cand 1, one safe 3. Need B0 between 1 and3, choose 2. Then no cand up1<2, down0<2, one safe up3>2, down2 tie if B_down=24? one safe down2 = B0 tie. Set B_down=23? no cand -1, one safe1 <2 bad. Need down one safe >2, so B_down>=25? no cand1 tie. Could set B0=1.5? B_up=25 no cand1<1.5, one safe3>1.5. B_down=24 no cand0, one safe2>1.5. Both safe: up3, down2 => up priority. Good. Use floats. No-op bias 1.5, up 25, down 24. No candidate: up1, down0, no-op1.5. one safe: up3, down2. one gold: up5, down4. Good. If only down gold: down4, up1, no-op1.5 => down. Good.
+
+But H2 candidate values may not exactly ±1; tanh of z. For safe_up with z=3 or -3 etc, ~±0.995. Good. Weighted sum approximate. Bias margins okay.
+
+Need consider rows. We use rows 1..8. What about row 0 and 9? Player cannot be there, entities spawn y=slot+1 1..8, move horizontally only, so no entities row 0/9. Ignore.
+
+H1 player_above_r: row_filter rows r+1..8. For r=1, rows 2..8. If player at 1, above false (-1). If player at 8, above true for r=1..7, false r=8. Good.
+player_below_r: rows 1..r-1. For r=8, rows1..7. If player at8, below true for r=8? p<8 false? Wait below_r means row r is below player? We defined candidate_down_r = safe_r AND player_below_r where player_below_r = p < r (row r below player). For r=8, if player p=1..7, p<8 true. If p=8 false. Good. row_filter rows 1..r-1 detects player in rows above r, i.e., p<r. Name maybe player_above_row? Let's be clear:
+- above_r: row r is above player? Actually if player p > r, row r is above player (smaller y). We need player in rows > r. So detector "player_below_r"? Let's name h1_above_r = player in rows greater than r (so r is above player). h1_below_r = player in rows less than r (so r is below player). Use names up_avail_r? Let's choose names:
+enemy_r, gold_r, player_below_r? Hmm.
+For move up to row r, need r < p. Detector p > r: call "player_south_of_r"? Since y increases down. Let's name "player_below_r" meaning player is below row r (p > r). Then row r is above player. For move down, need r > p: detector p < r: "player_above_r". To avoid confusion, names:
+- up_gate_r: player is below row r (p > r)
+- down_gate_r: player is above row r (p < r)
+H1 units: enemy_r, gold_r, up_gate_r, down_gate_r.
+up_gate_r row_filter rows r+1..8 (player below). down_gate_r row_filter rows 1..r-1 (player above).
+
+H2:
+up_safe_r = AND(not enemy_r, up_gate_r): terms enemy_r:-3, up_gate_r:3, bias -3.
+down_safe_r = terms enemy_r:-3, down_gate_r:3, bias -3.
+up_gold_r = terms gold_r:3, enemy_r:-3, up_gate_r:3, bias -6.
+down_gold_r = terms gold_r:3, enemy_r:-3, down_gate_r:3, bias -6.
+
+Need ensure H2 unit count 32. Names unique.
+
+Potential issue: H1 threshold for up_gate_r with row_filter empty for r=8: input_weights empty, threshold 0.5, gain 10 => b1=-5, W1 zero => h1=tanh(-5)=-0.9999. Good. down_gate_r for r=1 empty => -1.
+
+Potential issue: add_spatial_coord_extractor with col_weights all 1 and row_filter. It maps idx = (r*cols+c)*chs + channel. For row_filter list. col_weights length cols=10. Good. For channel 1 enemy, 2 gold, 0 player.
+
+Need import? The code block should define build_policy(). It can assume MLPProgram and MLPCompilerBackend are available? User says use following IR and backend. In final code, likely just function, no imports? It may need from .ir import MLPProgram? In their environment, maybe

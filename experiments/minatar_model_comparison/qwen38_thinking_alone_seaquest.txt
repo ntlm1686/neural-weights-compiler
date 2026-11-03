@@ -1,0 +1,200 @@
+We need answer user's request. Need design policy from scratch, no training, no code execution. Output complete Python function build_policy() returns ExecutableMLP architecture 600 -> 32 -> 32 -> 6 tanh. Network sees 10x10x6 grid flattened row-major, logits actions 0=no-op,1=left,2=up,3=right,4=down,5=fire. Actions sampled by softmax; with prob 0.1 previous action repeated. Episodes end terminal or 10000 steps. Source env and obs wrapper. Make single attempt without testing. Return one complete Python code block defining build_policy() returning ExecutableMLP constructed from directly written NumPy weight arrays. Do not use compiler.
+
+We need infer ExecutableMLP class? Not provided. Need likely from some benchmark? We need output code that defines build_policy returning ExecutableMLP. We don't know exact constructor signature. Need make reasonable assumption? The prompt says "Use only this prompt and, if instructed, the NeuralCompiler IR and backend. Output a complete Python function build_policy() that returns an ExecutableMLP of architecture 600 -> 32 -> 32 -> 6 with tanh activations." It likely expects a class ExecutableMLP available in environment? We need construct from directly written NumPy weight arrays. We need know how to instantiate. Could be from some library? Maybe ExecutableMLP(weights, biases, activations)? Need guess.
+
+We need produce code only. Need design policy weights manually. Since no training, we can set weights to implement heuristic. But architecture fixed 600->32->32->6 tanh. We can choose weights to approximate desired behavior. Need likely pass some hidden tests? They may evaluate score? Need make decent policy.
+
+We need understand environment and observation.
+
+Env Seaquest: 10x10 grid? x 0..9, y 0..8? Wait state shape (10,10,10), sub_y max 8? In act: up max(0, sub_y-1), down min(8, sub_y+1). So y 0..8? But state has 10 rows? oxygen gauge at state[9, ...]. Diver spawn y randint low=1 high=9 => 1..8. Enemy spawn y 1..8. So row 9 reserved for gauges. Observation 10x10x6 flattened row-major: obs[y,x,c]? state[y,x,c]. seaquest_obs: obs[:,:,0]=sub front/back; obs[:,:,1]=enemy fish/sub/bullet? Actually s channels: 0 sub_front,1 sub_back,2 friendly_bullet,3 trail,4 enemy_bullet,5 enemy_fish,6 enemy_sub,7 oxygen_guage,8 diver_guage,9 diver. obs channel 0 = sub (front|back). channel1 = enemy (fish|sub|bullet). channel2 = enemy|diver? s5|s6|s9. channel3 = friendly_bullet. channel4 = trail|sub_back? s3|s1. channel5 = oxygen|diver gauge.
+
+Actions: 0 no-op,1 left,2 up,3 right,4 down,5 fire. Sub orientation sub_or True if facing right, False left. Fire only if shot_timer 0, adds bullet at sub position with orientation. Bullets move horizontally one per step, can kill fish/sub. Diver: need collect 6 divers then surface at y=0 to get reward oxygen*10//200 and reset oxygen. If surface with <6 divers, no reward and oxygen reset? Actually _surface: if diver_count==6: diver_count=0, r=oxygen*10//200 else r=0; oxygen=200; diver_count -=1. Wait if diver_count <6, diver_count -=1? That seems bug? If diver_count=0 and surface, terminal if diver_count==0 before _surface? In act: if sub_y==0: if not surface: if diver_count==0 terminal else r += self._surface(). _surface then diver_count -=1. If diver_count=1, after surface diver_count=0, oxygen reset. So need collect 6 to get reward, but can surface with any >0 to reset oxygen? It decrements by 1, so if you have 1, after surface 0. If you have 2, after surface 1. So you can top up oxygen by surfacing with at least 1 diver, but only full 6 gives reward. Terminal if at surface with 0 divers. Oxygen decreases by 1 per step when y>0. Oxygen max 200. Need survive.
+
+Enemies spawn every e_spawn_speed (initial 20, ramps down to 1) at x=0 or 9, y 1..8, moving horizontally with move_speed (initial 5, ramps down to 2? Actually ramping: if move_speed>2 and ramp_index%2: move_speed-=1; if e_spawn_speed>1: e_spawn_speed-=1; ramp_index +=1. So both decrease over surfaces). Fish/subs move horizontally every move_speed steps. They can kill sub if same cell. Enemy subs shoot every 10 steps bullet horizontally. Enemy bullets kill sub. Friendly bullets kill fish/sub. Diver spawn every 30 steps at x=0/9 y1..8, move horizontally every 5 steps. Collect by being same cell, max 6.
+
+Observation channels:
+0: sub position (front/back) maybe tells own position and orientation? front at sub_x, back at sub_x-1 if facing right else +1. So can infer sub position and orientation.
+1: enemy fish/sub/bullet (all threats)
+2: enemy fish/sub/diver (collectibles? includes enemies and divers)
+3: friendly bullets
+4: trail (enemy/diver back) | sub_back. Trail indicates direction of moving objects? For fish/sub/diver, back_x = x-1 if moving right (lr True) else x+1. So trail behind. Also sub_back.
+5: oxygen gauge row 9 and diver gauge row 9.
+
+Need policy 600 input. We can design weights to produce actions based on simple features. But MLP with tanh and random-ish weights? We can set first layer to compute features, second combine, output logits. Since no training, we can manually encode heuristic. Need produce weight arrays. Could use deterministic weights with large values to implement logic? Tanh saturates. We can design linear features in hidden units. But only 32 hidden, 32 hidden. Need enough to implement: avoid threats, collect divers, surface when oxygen low or divers full, fire at enemies in line, move toward divers, etc.
+
+Maybe easier: set output layer to always choose a safe action? But need score. Could make policy mostly no-op? It will die from oxygen? If no-op at surface? Reset at y=0 surface True. If no-op, sub_y=0, surface True, oxygen not decrease? In act: if sub_y >0 oxygen-- else if not surface... If surface True and y=0, no terminal, no oxygen decrease. But enemies spawn and can hit? At y=0, enemies spawn y 1..8, bullets? Enemy subs at y 1..8, bullets horizontal at their y, not y=0. Diver spawn y1..8. So if stay at surface y=0, no oxygen decrease, no terminal (surface True). But enemies? They don't come to y=0. So no-op forever? Episode ends at 10000 steps, reward 0. But maybe evaluation expects positive? But policy can survive 10000 steps with no-op? Let's check: reset sub_y=0, surface=True. act no-op: spawn timers, no movement. Enemies spawn at y 1..8, move horizontally, may shoot bullets at y 1..8. No collision with sub at y=0. Oxygen stays 200. Diver spawn, move, no collect. Terminal only if sub_y>0 oxygen<=0 or surface with diver_count=0 when not surface. Since surface remains True, no terminal. So no-op yields 10000 steps, reward 0. If evaluation scores reward, maybe 0. But maybe they want maximize reward. Need better.
+
+Can we design policy to collect divers and surface for reward. Need navigate. But manual weights hard. Could use simple heuristic encoded in weights.
+
+Need know ExecutableMLP. Maybe from "NeuralCompiler" in some benchmark. It might expect class with forward method. We can define our own ExecutableMLP? Prompt says returns an ExecutableMLP. It may be available in test harness. But if not, we can define it in code? "Return one complete Python code block defining build_policy() returning an ExecutableMLP constructed from directly written NumPy weight arrays. Do not use the compiler." It may allow defining ExecutableMLP? Usually they provide ExecutableMLP class. But to be safe, we can define a minimal ExecutableMLP class in code if not present? But if harness expects specific class, defining our own may conflict? We can include class ExecutableMLP with __call__ or forward. But prompt says returns an ExecutableMLP, likely they have class. If we define it, okay? It says complete Python function build_policy(), not necessarily only function? "Return one complete Python code block defining build_policy() returning an ExecutableMLP constructed from directly written NumPy weight arrays." Could include helper class? Maybe not. But if ExecutableMLP not defined, code fails. In these tasks, they often provide ExecutableMLP in environment. We should assume it exists. But we need know constructor. Could be ExecutableMLP(weights, biases) where weights list of arrays, biases list. Or ExecutableMLP(layer_weights, layer_biases, activation). Need infer from "NeuralCompiler IR and backend". Maybe ExecutableMLP is a class in their backend that takes a list of (W,b) and activation? Let's think.
+
+The prompt: "Design a policy from scratch, no training, no forward pass, no rollouts, no feedback, no code execution. Use only this prompt and, if instructed, the NeuralCompiler IR and backend. Output a complete Python function build_policy() that returns an ExecutableMLP of architecture 600 -> 32 -> 32 -> 6 with tanh activations. ... Return one complete Python code block defining build_policy() returning an ExecutableMLP constructed from directly written NumPy weight arrays. Do not use the compiler." This sounds from a benchmark where they ask LLM to generate policy code. They likely have a class ExecutableMLP defined in the evaluation environment. It may be constructed as ExecutableMLP(weights, biases, activations) or ExecutableMLP(weights, biases) with tanh fixed? Need choose.
+
+Maybe "ExecutableMLP" from "neuralcompiler" package? Let's search memory. I can't internet. But maybe known: In some RL code, ExecutableMLP is a simple class:
+class ExecutableMLP:
+    def __init__(self, weights, biases, activation='tanh'):
+        self.weights = weights
+        self.biases = biases
+        self.activation = activation
+    def __call__(self, x):
+        for i,(W,b) in enumerate(zip(self.weights,self.biases)):
+            x = x @ W + b
+            if i < len(self.weights)-1: x = np.tanh(x)
+        return x
+Or maybe forward.
+
+Could be from "NeuralCompiler IR" where you generate IR and backend compiles to ExecutableMLP. But they say do not use compiler, construct directly. Maybe ExecutableMLP expects a list of layers: [ (W,b), ... ] and activation function name. Or a dict.
+
+Need maximize chance. We can write code that tries multiple constructor signatures? But must return ExecutableMLP. We can instantiate with try/except? That's code execution at build time, allowed? It says no code execution? Means we shouldn't run, but code can include try? Probably okay. But "constructed from directly written NumPy weight arrays". We can do:
+try:
+    return ExecutableMLP([W1,W2,W3], [b1,b2,b3], 'tanh')
+except TypeError:
+    return ExecutableMLP([W1,W2,W3], [b1,b2,b3])
+But if ExecutableMLP not defined, NameError. Could define fallback class? But if harness has class, our fallback not used. If not, we can define. But if we define class after? We can include:
+try:
+    ExecutableMLP
+except NameError:
+    class ExecutableMLP: ...
+Then build. But if harness expects its own class, our try won't override. Good.
+
+But if constructor signature different, try/except can handle. Need ensure no side effects. Could also create object with __call__ and forward. But if harness expects specific attributes, maybe not.
+
+Maybe better to not define class, assume provided. But to be safe, include fallback only if not defined. However, if harness checks type is their ExecutableMLP, our fallback would fail if theirs not defined. But likely theirs defined. If not, fallback helps.
+
+Need design weights. We can choose simple policy: always no-op? Then weights can be zero except output bias for no-op. That returns no-op always. But action sampling with 0.1 repeat previous; if initial previous? likely no-op. It will survive 10000 steps, reward 0. But maybe they evaluate survival and reward; 0 reward maybe low. Could we do better with simple weights? Maybe collect divers? Hard but possible with handcrafted features.
+
+Let's explore environment to design heuristic policy. We can manually compute features from obs. Input 600 = 10*10*6. Row-major: index = (y*10 + x)*6 + c. We can set first layer weights to compute sums over channels/positions. Hidden 32. We can use hidden units as feature detectors. Then second layer combine to output logits.
+
+Because tanh, we can make hidden units linear-ish if weights small. But we can also use large weights to threshold. Need output logits. We can set output layer to select action based on hidden features.
+
+Simpler: implement a finite-state heuristic using hidden units? But no recurrent state; only observation. Previous action repeat 0.1 external. We can use observation to decide.
+
+Key tasks:
+- If at surface (y=0) and have divers? Need surface? Actually if at y=0 and surface False, must have diver_count>0 to not terminal. We can infer surface? Observation channel 0 sub at y=0. But surface flag not directly observed. If sub at y=0, likely surface? Could be just at top. If surface False and y=0 with divers>0, act will surface automatically? In act, if sub_y==0 and not surface: if diver_count==0 terminal else r += _surface(). This happens regardless of action. So if at y=0 and not surface, it surfaces. We don't need action. But if surface True and y=0, no-op safe. To collect divers, need go down.
+- Oxygen gauge channel 5 row 9: oxygen = number of 1s in row 9 col 0..9? state[9,0:max(oxygen)*10//200,7]=1. So oxygen/20 per cell? 200 -> 10 cells. Diver gauge: state[9,9-diver_count:9,8]=1, so diver_count cells at right end. Obs channel5 = oxygen|diver gauge. We can count channel5 row9 to get oxygen+divers? But overlapping? oxygen cells left, diver cells right, no overlap if oxygen low? If oxygen 200 and diver_count 6, oxygen cells 0..9, diver cells 3..8 overlap? state bool OR? Actually state separate channels, obs OR channel7|8, so overlap possible. But can count. Diver count maybe from rightmost ones. Hard.
+- Sub position: channel0 has two cells: front and back. We can find x,y. Orientation: if back is left of front => facing right; if back right => facing left. But for movement, orientation only matters for fire. We can set orientation by moving left/right.
+- Threats: channel1 enemy fish/sub/bullet. Need avoid. Diver/enemy channel2 includes divers and enemies. Friendly bullets channel3. Trail channel4.
+
+Could design policy:
+1. If oxygen low (e.g., <50) or diver_count high (>=6), go to surface (y=0) and surface. If at y=0, no-op.
+2. Else, if enemy in same row ahead? Fire if enemy in same row and in front orientation? Or turn to face enemy and fire.
+3. Else, move toward nearest diver (channel2 but not enemy? channel2 includes enemies, can't distinguish). Maybe use channel2 and channel1: diver = channel2 & ~channel1? But MLP can't easily AND? We can create features for channel2 minus channel1? Since obs binary, channel2 includes enemies and divers. channel1 includes enemies. Diver-only = channel2 - channel1 (where both 1 for enemies, 0 for diver? Actually enemy fish/sub: channel1=1, channel2=1. Diver: channel1=0, channel2=1. So channel2 - channel1 = 1 for diver, 0 for enemy. Good. We can compute weighted sum with +1 for channel2, -1 for channel1 to detect divers. But enemies also channel4 trail, channel1. Diver trail channel4. Could use.
+4. Avoid immediate threats: if threat in adjacent cell in direction, don't move there; maybe move away.
+
+But implementing with 32 hidden units possible. We can allocate hidden units:
+- h0: sub_y? Need know if at surface. Could compute sum of channel0 over row 0? If sub at y=0, channel0 has two cells in row0. But back may be out of bounds? If sub_x=0 facing left, back_x=1? state sets back_x = sub_x -1 if sub_or else sub_x+1. If sub_x=0 and facing left, back_x=1 (within). If sub_x=9 facing right, back_x=8. So always two cells in same row. So row0 channel0 sum =2 if y=0. We can make hidden unit = sum channel0 row0. Large positive if at surface.
+- h1: oxygen level: sum channel5 row9. But includes diver gauge. Could approximate. Low oxygen if sum small? At start oxygen 200 => 10 cells, diver 0 => sum 10. As oxygen decreases, sum decreases. Diver count adds up to 6 at right, may overlap. But okay.
+- h2: diver count: sum channel5 row9 cols 3..8? Or right side. Could compute.
+- h3: nearest diver x/y? Hard.
+- h4: threat ahead left/right/up/down? Need local features around sub. But sub position variable. Without knowing sub position, can't compute relative. We can compute global sums but not relative. Could use convolution-like weights? First layer can compute for each cell? But hidden only 32, cannot have per-cell features. However, we can set weights to compute sums over all cells of channel1, etc. Not relative.
+
+Maybe use output layer directly from input? Architecture fixed hidden, but we can make hidden units pass input? 32 hidden can't pass 600. But we can set first layer to compute a few global features. Policy may be crude.
+
+Alternative: Use weights to implement a simple spatial policy independent of sub position? For example, always move right if no threat on right, else left, etc. But need know threats relative to sub. Could use global threat distribution: if more threats on right, move left, etc. But sub position unknown. Could infer sub position from channel0 and use it in weights? First layer can compute sub_x and sub_y as weighted sums: sub_x = sum x * channel0, sub_y = sum y * channel0. Since channel0 has two cells (front/back), sum x gives 2*sub_x + back_offset. But can approximate. Hidden units can compute sub_x, sub_y. Then other hidden units can compute threat sums in quadrants relative? But to compute relative, need product of sub_x and threat positions, which first layer linear cannot. Second layer can multiply hidden features? MLP with tanh can approximate products if hidden units encode sub_x and threat_x, then second layer can combine? But only linear combination of tanh features, no explicit product. However, tanh of sum can create nonlinear interactions. But hand-designing hard.
+
+Maybe we can set first layer to compute for each of 32 hidden a weighted sum over input that corresponds to a specific action's desirability using global patterns. For example, output logits can be linear combination of input via hidden identity? But hidden 32 bottleneck prevents direct 600->6. But we can make hidden units represent 32 selected input features, then output combine. We can choose 32 most important input cells? But sub position variable, so not.
+
+Could make first layer compute 32 global features: sums over channels, rows, columns, quadrants. Then output choose action based on these.
+
+Maybe a simple policy: collect divers by moving toward center? Diver spawn at edges x=0 or 9, y 1..8, move horizontally. They traverse row. If sub stays at center x=5, divers will pass through? Diver moves horizontally every 5 steps. If sub at x=5, y same as diver, can collect. But sub doesn't know diver y. Could move vertically to scan rows. Maybe policy: move down to y=4, then left/right to intercept? But no state.
+
+Could use observation channel2 (divers+enemies) global sum. If divers present, move toward side with more channel2? Diver spawn from left/right. If more channel2 on left, move left; if right, move right. Also vertical: if more channel2 above/below, move up/down. This could collect some.
+
+Need avoid enemies. channel1 threats. If more threats in direction, avoid.
+
+Could implement output logits as:
+logit_left = threat_right - threat_left + diver_left - diver_right + ...
+But need compute directional sums relative to sub? Could approximate by global left/right halves. If sub near center, okay. But sub moves.
+
+Maybe use sub_x hidden to adjust? First layer can compute sub_x. Second layer can combine sub_x with global left/right threat? For example, if sub_x < 5, left side closer? But linear combination can't multiply sub_x and threat_left. But tanh nonlinearity maybe.
+
+Alternative: Use first layer to compute 10 row sums and 10 column sums? 20 features. Plus channel sums. Then output can choose move toward row/col with divers. But sub position? We can compute sub row/col. To decide up/down, compare diver row sum above/below sub. Need product? Could compute row sums and sub_y, then second layer linear can't compare row above vs below based on sub_y. But we can create hidden units for each row's diver sum (10) and sub_y (1). Output up logit could be weighted sum of row diver sums with weights decreasing with row? But if sub_y variable, fixed weights not relative. However, we can set output up = sum_{y} w_y * diver_row_y, where w_y positive for rows above? But "above" depends on sub_y. Could use 10 hidden units for row diver sums, and output up/down with weights that are high for all rows? Not relative.
+
+Could use 32 hidden to encode 10 row diver sums and 10 column diver sums, plus sub row/col, oxygen, threats. Output layer can have weights that approximate a policy: e.g., up logit = sum row_diver[y] * (some function of y) but not sub_y. If sub_y is high, rows above are lower y; if sub_y low, rows above fewer. Fixed weights can't adapt. But maybe use sub_y to shift? Linear combination of row_diver and sub_y cannot produce relative comparison. But tanh hidden could: hidden unit = tanh(row_diver_y - sub_y) if first layer can compute row_diver_y - sub_y? First layer linear can compute row_diver_y (sum over row y channel2) and sub_y (sum y*channel0). A hidden unit can be weighted sum: row_diver_y - alpha*sub_y. Then tanh. For each y, we can have hidden unit representing diver at row y relative to sub_y? But only 32, can allocate 10 for rows. Then output up can sum hidden units for y < sub_y? But output weights fixed, cannot condition on sub_y. However, hidden unit itself saturates positive if row_diver_y > alpha*sub_y. If sub_y large, rows above have y<sub_y, but row_diver_y is count not y. Not good.
+
+Maybe compute distance features: For each row y, hidden = tanh(diver_row_y * (y - sub_y)?). First layer cannot multiply y*sub_y. But can compute y*diver_row_y? That's just y*count. And sub_y. Linear combination y*count - sub_y*count? Need product count*sub_y, not linear.
+
+Could use input features directly: For each cell, channel2. To compute vertical direction, we can set output up logit weights positive for cells above some fixed line, negative below. If sub near center, okay. But sub may move.
+
+Maybe simpler: Use a fixed patrol policy that doesn't need relative: e.g., move in a Lissajous pattern based on global time? No time in obs. Could use oxygen gauge as time since surface (decreases). Oxygen level gives time. We can use oxygen to decide vertical position: e.g., y target = oxygen/20? But no state. Could set policy to move down when oxygen high, up when low. But need know current y. Could infer sub_y from channel0. Hidden sub_y. Output up/down can be based on sub_y and oxygen: e.g., if sub_y < target, down; if > target, up. Linear combination of sub_y and oxygen can implement threshold: down logit = k*(target - sub_y). target = f(oxygen). First layer can compute sub_y and oxygen. Second layer can combine. Good. We can implement a deterministic vertical patrol based on oxygen: target_y = (200 - oxygen) / 20? Actually oxygen decreases 1 per step underwater. At surface oxygen=200. As go down, oxygen decreases. We can use oxygen to know time underwater. But target could be e.g., y = (200 - oxygen) // 20, capped 8, then return? Need avoid terminal. Could just move down until oxygen low then up. But need collect divers.
+
+Horizontal patrol: use sub_x and maybe oxygen to move left/right. Could implement a back-and-forth using sub_x: if sub_x < 5 move right, else left. That keeps center. Diver spawn at edges and move across; staying center may collect if same row. Vertical patrol based on oxygen may scan rows. This could collect some divers and survive.
+
+Need avoid threats. Could add threat global sums to bias away. But maybe not necessary? Enemies can kill. If patrol center, enemies spawn edges and move across; may collide. Need fire or avoid. Could fire when enemy in same row? Need know enemy row relative. Hard.
+
+Maybe use channel1 threat row sums. If threat in same row as sub, fire? Need same row. Could compute sub_y and threat row sums. Output fire logit = sum_y threat_row_y * something? Fixed weights can't condition on sub_y. But we can allocate hidden units for threat_row_y - sub_y? Again product issue. But maybe first layer can compute threat_row_y and sub_y; second layer fire = sum_y threat_row_y * w_y - sub_y * sum threat? Not relative.
+
+Could use input directly in first layer to compute "threat in same row as sub" by weights that depend on sub? Linear cannot multiply sub position and threat cell. But we can create 10 hidden units: for each row y, h_y = threat_row_y - sub_y? Not same row.
+
+Maybe use channel0 sub position to mask? No.
+
+Given constraints, a simple survival policy may be best. But maybe evaluation expects any valid policy, not high score. The prompt says "Design a policy" not necessarily optimal. Could output no-op policy. But they likely want something plausible. Need decide.
+
+The instruction: "Make a single attempt without testing." It may be from a benchmark measuring performance; they want best possible hand-designed policy. We should try to make decent heuristic.
+
+Need know action sampling: softmax logits, with prob 0.1 previous action repeated. If we set large logits for desired action, stochastic small. We can set logits differences large (e.g., 10) to make deterministic. Tanh hidden saturates, output can be large if weights large.
+
+We can design weights to implement a simple state machine using observation features. Let's think of feasible features with 32 hidden.
+
+Input index mapping: y 0..9, x 0..9, c 0..5. idx = (y*10+x)*6+c.
+
+We can compute:
+- sub_x = sum_x x * obs[y,x,0] / 2? Since two cells. We can just use sum.
+- sub_y = sum_y y * obs[y,x,0] / 2.
+- oxygen = sum obs[9,x,5] maybe 0..10.
+- diver_count = sum obs[9,x,5] for x>=3? But overlap. Could use rightmost.
+- threat_count = sum obs[:,:,1]
+- diver_count_obs = sum obs[:,:,2] - threat_count? Since channel2 includes enemies+divers. But enemies also channel1. Diver-only sum = sum c2 - sum c1 (because enemies have both 1, divers c2=1 c1=0). But enemy bullets? channel1 includes enemy bullets, channel2 does not include enemy bullets? obs channel2 = s5|s6|s9 (fish, sub, diver), not enemy bullet. channel1 = s5|s6|s4 (fish, sub, enemy bullet). So c2 - c1 = diver - enemy_bullet. Could be negative. But okay.
+- friendly_bullet_count = sum c3.
+- trail_count = sum c4.
+
+Directional global sums:
+- left_threat = sum x<5 c1, right_threat x>=5 c1, up_threat y<5 c1, down_threat y>=5 c1.
+- left_diver = sum x<5 (c2-c1?) etc.
+
+But relative to sub not exact.
+
+Could compute sub_x, sub_y, and use output layer to choose movement based on sub_x and sub_y only (patrol), plus oxygen. That is easy.
+
+Policy idea:
+- If at surface (sub_y == 0) and oxygen high? Maybe no-op to surface? But to collect, need go down. We can use oxygen to decide: if oxygen > 150, move down; if oxygen < 50, move up; else patrol horizontally.
+But if at y=0 and surface True, moving down starts oxygen decrease. If surface False and y=0, act will surface automatically if diver_count>0. We don't know surface flag. But if we move down from y=0, surface becomes False? In act, if a='d': sub_y=1. Then after movement, if sub_y>0 oxygen-- and surface=False. So okay. If at y=0 and surface False with divers, it surfaces before action? Actually act begins, if terminal return. Then action movement. Then after movement, if sub_y>0 ... else if not surface... So if at y=0 surface False and action down, it moves to y=1, then sub_y>0, surface=False, oxygen--. It does not surface. So if we are at y=0 surface False with divers, we might want to stay to surface. But we don't know surface flag. Could infer if oxygen just reset? Not. But if we use oxygen low to go up, at y=0 no-op maybe surface. If surface False and diver_count>0, no-op will surface. Good. If surface True, no-op safe. So at y=0, no-op is safe and may surface if needed. To go down, need choose down when y=0 and oxygen high and maybe divers available. But if surface False with divers, choosing down would avoid surfacing and lose oxygen. But surface False only occurs after leaving surface; if we return to y=0, we should no-op to surface. How know? Maybe if oxygen is high (just reset) and sub_y=0, could be after surfacing (surface True) or before surfacing (surface False). If before surfacing, oxygen may be low (since we went up due to low oxygen). So use oxygen: if y=0 and oxygen < 100, no-op (surface); if oxygen > 150, maybe go down. At start oxygen=200, y=0 surface True, go down. After surfacing, oxygen=200, surface True, go down again. Good. If we go up with oxygen low, at y=0 oxygen maybe <100, no-op surfaces. Good.
+
+Vertical target: We can set desired y based on oxygen: e.g., when oxygen > 150, target y=4 (mid); when oxygen 100-150, target y=2; when <100, target y=0. Or simply: if sub_y < 4 and oxygen > 120: down; elif sub_y > 0 and oxygen < 80: up; else no vertical. This creates dive to mid then return.
+
+Horizontal: patrol between x=1 and x=8: if sub_x < 5: right; elif sub_x > 5: left; else no-op or fire. This keeps center. Diver spawn at edges and move horizontally; if sub at center and same row, collect. But if sub row not same, no. Vertical patrol may align sometimes.
+
+Fire: If enemy in same row? Hard. Could fire periodically when facing right/left. Since patrol horizontal, orientation alternates. We can fire when at center? Maybe set fire logit high when threat_count > 0 and sub_x near center? But firing only horizontal. Could kill enemies in same row. If we patrol row, may kill some. We can set fire action when sub_x == 5 and threat_count > 0? But need orientation. If moving right, face right; if moving left, face left. At center, maybe fire. But action fire doesn't change orientation. We can choose fire instead of move at center. Could help.
+
+But output action selection: We can compute logits for actions. We can set base logits:
+- no-op: 0
+- left: based on sub_x > 5 or threat_right? 
+- right: sub_x < 5 or threat_left?
+- up: oxygen low or sub_y > target
+- down: oxygen high and sub_y < target
+- fire: threat_count high and sub_x near 5? 
+Need large weights.
+
+We can implement with hidden units:
+h0 = sub_x (sum x*c0)
+h1 = sub_y (sum y*c0)
+h2 = oxygen (sum row9 c5)
+h3 = threat_count (sum c1)
+h4 = diver_count_obs (sum c2 - c1 maybe)
+h5 = left_threat (sum x<5 c1)
+h6 = right_threat (sum x>=5 c1)
+h7 = up_threat (sum y<5 c1)
+h8 = down_threat (sum y>=5 c1)
+h9 = left_diver (sum x<5 c2 - c1?)
+h10 = right_diver
+h11 = up_diver
+h12 = down_diver
+h13 = center_x? maybe 1 - |sub_x-5|? Can't absolute linear. But can use sub_x.
+h14 = at_surface = sum row0 c0
+h15 = low_oxygen = maybe -oxygen
+...
+But first layer linear can compute these sums. Hidden tanh will squash. We can use small weights to keep linear for ranges. sub_x sum from channel0: two cells, sum x maybe 0..18? Actually front+back x: if facing right at x, back x-1 => 2x-1; if left => 2x+1. Range -1? x=0 left =>1, x=9 right=>17. So sub_x approx (h0+?)/2. We can scale.
+
+Tanh with input up to 18 saturates. We can scale weights by 0.1 to keep within [-1,1]. But output needs large logits. We can use second layer weights large.
+
+Maybe avoid tanh saturation by scaling first layer weights small. For counts up to 100, scale 0.01.

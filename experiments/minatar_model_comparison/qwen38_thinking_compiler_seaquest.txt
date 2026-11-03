@@ -1,0 +1,206 @@
+We need answer user's request. Need design policy from scratch, no training, no forward pass, no rollouts, no feedback, no code execution. Output complete Python function build_policy() returns ExecutableMLP architecture 600 -> 32 -> 32 -> 6 tanh. Use NeuralCompiler IR and backend. Single attempt without testing. Need produce code block defining build_policy() that returns MLPCompilerBackend.compile(program). Need think carefully.
+
+We need design a policy for Seaquest. Observation 10x10x6 flattened row-major. Channels:
+0: sub_front | sub_back (sub position? front/back)
+1: enemy_fish | enemy_sub | enemy_bullet? Wait seaquest_obs:
+obs[:,:,0] = s[:,:,0] | s[:,:,1] (sub front/back)
+obs[:,:,1] = s[:,:,5] | s[:,:,6] | s[:,:,4] (enemy fish, enemy sub, enemy bullet)
+obs[:,:,2] = s[:,:,5] | s[:,:,6] | s[:,:,9] (enemy fish, enemy sub, diver)
+obs[:,:,3] = s[:,:,2] (friendly bullet)
+obs[:,:,4] = s[:,:,3] | s[:,:,1] (trail | sub_back)
+obs[:,:,5] = s[:,:,7] | s[:,:,8] (oxygen gauge, diver gauge)
+So channels:
+0 sub (front/back)
+1 threats (enemy fish/sub/bullets)
+2 targets? enemies+divers
+3 friendly bullets
+4 trail/back
+5 gauges (oxygen/diver count)
+
+Actions: 0 no-op, 1 left, 2 up, 3 right, 4 down, 5 fire.
+Need policy likely simple heuristic: avoid threats, collect divers, surface when enough divers/oxygen low, fire at enemies in front? But only 32 hidden units each layer, limited. Need use IR to build deterministic weights. Need fit within 32 H1 and 32 H2. Need output logits. Need no testing. Need robust enough.
+
+We can design simple policy using few units. Need understand environment and observation.
+
+Grid 10x10, row y 0 top surface? In state: sub_y=0 surface, y>0 underwater. Oxygen decreases when sub_y>0. At surface if diver_count==0 terminal else surface reward. Need collect 6 divers to get reward? _surface: if diver_count==6 reset to 0 and r=oxygen*10//200 else r=0; oxygen=200; diver_count -=1. Wait if diver_count <6, surface gives 0 and decrements diver_count? That seems weird: if you surface with less than 6, you lose one diver? Actually diver_count -=1 always. So to get reward need 6 divers, else surface reduces count. Terminal if surface with 0 divers. So optimal: collect 6 divers then surface. Avoid enemies.
+
+Observation gauges: oxygen gauge row 9 columns 0..oxygen*10//200 -1? state[9, 0:max(0,oxygen)*10//200,7]=1. diver gauge state[9, 9-diver_count:9,8]=1. obs channel5 = oxygen|diver gauge. So row 9 has oxygen left from left, diver count from right. Could detect low oxygen by absence? Hard with 32 units.
+
+Need policy maybe: if at surface and diver_count>0? But can't know diver_count easily except gauge. Could just always go down? But terminal if surface with 0. Starting at surface, diver_count=0, if no-op at surface terminal? In act: if sub_y>0 oxygen-- surface=False else if not surface: if diver_count==0 terminal else surface. At reset surface=True. If first action no-op at surface: sub_y=0, surface True, no terminal? The else only if not self.surface. So initial no-op safe? But if move down then surface False. If later move up to y=0, surface False, then if diver_count==0 terminal. So need not surface with 0. Could just stay at surface? But no reward, episode 10000 steps? If no-op at surface forever, no terminal? oxygen not decrease, surface True, no terminal. But no reward. Maybe policy should do something.
+
+Need likely simple: move toward divers (channel2 includes divers and enemies), avoid threats (channel1), fire when enemy in front? But limited.
+
+Could design policy to always fire? But shot timer 5, no movement. Enemies spawn and kill. Not good.
+
+Need use 32 units. We can create detectors for local threats and divers, direction preferences.
+
+Observation flattened row-major: index = (r*10 + c)*6 + ch. r=y, c=x.
+
+Sub position channel0: exactly one cell? sub_front or sub_back. At reset sub at (0,5) front? sub_or False, state sub_y,sub_x,0=1; back_x = sub_x+1 if not or? back_x = self.sub_x -1 if self.sub_or else self.sub_x+1. If sub_or False, back_x=6. So channel0 has two cells: front at (0,5), back at (0,6). obs channel0 both. So sub occupies two adjacent cells horizontally. Movement left/right changes x and orientation. Up/down changes y.
+
+Threats channel1: enemy fish/sub/bullets. Targets channel2: enemy fish/sub/divers. Friendly bullets channel3. Trail/back channel4: trail (behind enemies/divers) | sub_back. Gauges channel5 row9.
+
+We can detect if threat adjacent? Need avoid. With 32 H1, can make detectors for threats in certain relative positions? But sub position variable. Without knowing sub position, hard to compute relative. But channel0 gives sub position. Could use AND gates between sub cell and threat cell? H1 AND gate over two input groups: outputs +1 iff both active. We can create for each possible sub position? 100 positions * directions too many. But maybe use global features: count threats, count divers, etc.
+
+H1 units can be threshold over input weights. We can make sum over channel1 (threat count), channel2 (target count), channel3 (friendly bullet count), channel5 gauges. H2 combine.
+
+Policy could be:
+- If threat count high, move up (surface) or away? But surface may terminal if no divers.
+- If target count high, move toward? Can't direction.
+- Fire if threat count >0? But bullets only horizontal in front. Could fire always when threat count >0.
+- Move down to collect? Maybe default down, if threat count high up, if target count high fire? Need survive.
+
+But action sampling softmax with 0.1 repeat previous. We only output logits. Need deterministic-ish high logit for chosen action.
+
+Could design simple survival: stay at surface? But no reward. Maybe evaluation expects some score? Need policy from scratch. Could be benchmark where simple heuristic gets reward. Need maximize? We don't know. Need produce plausible policy.
+
+Given constraints 32->32, can implement a finite-state-ish policy using gauges? Maybe use oxygen gauge to surface when low. Diver gauge to know count. But 32 units limited.
+
+Let's analyze environment more.
+
+Seaquest: sub moves horizontally 0-9, vertically 0-8 (not 9? min 0 max 8). Row 9 is gauges only. Enemies spawn y 1-8. Diver spawn y 1-8. Bullets horizontal. Enemy subs shoot every 10 steps? e_bullets. Fish/sub move horizontally with move_speed timer (initial 5, ramp down to 2). Enemy spawn speed initial 20, ramp down to 1. Diver spawn every 30.
+
+Reward: +1 per enemy killed by friendly bullet. Surface with 6 divers gives oxygen*10//200 (0-10). Terminal on collision with enemy fish/sub/bullet, oxygen <=0, surface with 0 divers.
+
+Need collect 6 divers. Divers move horizontally, pause 5 steps? diver[3] initial 5, when 0 move one and set 5. So slow.
+
+Observation channel2 includes divers and enemies. Can't distinguish diver from enemy except channel1 includes enemies, channel2 includes enemies+divers. So diver-only = channel2 & not channel1? But channel1 includes enemy bullets too. Could detect cells with target but no threat as likely diver. But enemies also in channel1. Diver not in channel1. So channel2 & ~channel1 = diver. But channel1 includes enemy bullets, so if bullet overlaps target? rare. We can make H1 detectors for diver presence? Need per cell AND of channel2 and NOT channel1. H1 AND gate only positive groups, no NOT. But threshold can use negative weights: sum w2*target - w1*threat > threshold. For each cell, a unit can output +1 if target present and threat absent. But 100 cells too many. Could sum over all cells: total target - total threat = diver count? Since enemies contribute to both target and threat, cancel; diver contributes target only; enemy bullets contribute threat only (negative). So total_target - total_threat approx diver_count - enemy_bullet_count. Could be negative. But can threshold >0 to detect some divers. H1 threshold with weights +1 on channel2 all cells, -1 on channel1 all cells, threshold maybe 0.5. That gives +1 if more target than threat. But if many enemy bullets, false negative. Could use +2 target -1 threat threshold 0.5.
+
+Similarly threat count: sum channel1. Diver count gauge: row9 right side. Could detect diver_count via channel5 row9 columns. Diver gauge: state[9, 9-diver_count:9,8]=1. So if diver_count=0, no gauge; 1: col8; 2: col7-8; ... 6: col3-8. Oxygen gauge: row9 cols 0..oxygen*10//200 -1. obs channel5 OR. So row9 channel5 has oxygen left and diver right. Could detect low oxygen by absence of oxygen gauge? Hard. Could detect high diver count by presence at col3? If diver_count>=6, col3 active. If >=5 col4 active, etc. We can make H1 detectors for diver_count thresholds using row9 channel5 columns. But channel5 also oxygen may overlap? Oxygen gauge max 200 -> 10 columns 0-9. Diver gauge cols 3-8. They can overlap. OR means if oxygen high, cols 0-9 all active, so diver gauge indistinguishable when oxygen full. At start oxygen=200, row9 all channel5 active. As oxygen decreases, left columns turn off. Diver gauge right columns remain. Could detect diver_count by rightmost? If oxygen low, maybe. But not reliable.
+
+Maybe use channel5 row9 col8 always if oxygen>180 or diver_count>=1. Not good.
+
+Could detect oxygen low by absence of col0? If oxygen <=0 terminal. Oxygen gauge length = oxygen*10//200. For oxygen 199 -> 9 cols (0-8), col9 off. For oxygen 100 -> 5 cols. Low oxygen <20 -> 1 col. Could make detector for oxygen < 50: absence of col5? But absence requires negative weights and threshold. H1 threshold can sum negative weights on gauge cells and positive bias? For absence, use -1 weights on cells that should be present when oxygen high, threshold negative? Example unit = tanh(gain*( -sum_{col0..4} x + 5? )). If all present sum=5 -> 0; if absent sum<5 -> positive. But threshold parameter: sum w_i x_i - threshold. If w=-1 for 5 cells, threshold=-4.5: when all present sum=-5, -5 - (-4.5)=-0.5 negative; when one absent sum=-4, -4+4.5=0.5 positive. So can detect at least one missing among first 5 oxygen cells. But channel5 OR diver gauge may fill? Diver gauge cols 3-8, so col0-2 only oxygen. Could use col0-2 to detect oxygen <160? Not low. For low oxygen, col0 missing when oxygen<20. Could detect col0 absent: weight -1 col0, threshold -0.5: if present -1+0.5=-0.5; absent 0+0.5=0.5. But if oxygen=0 terminal. Could surface when col0 absent? But at surface oxygen full. Underwater oxygen decreases 1 per step. Need surface before 0. Could detect oxygen low (col0 absent) and move up. But if no divers, terminal. Need know divers.
+
+Maybe policy: collect divers by moving down, when oxygen low surface. But need 6 divers for reward; if surface with <6 lose one. Could still survive? If surface with 1, diver_count becomes 0, then if at surface and surface False? _surface sets surface=True, diver_count-=1. If diver_count becomes 0, not terminal immediately? In act: if sub_y==0 and not surface: if diver_count==0 terminal else r += _surface(). _surface decrements. If diver_count was 1, not terminal, _surface sets diver_count=0, surface=True. Next step at surface with surface True no terminal. So can surface with 1 to reset oxygen, lose diver. Could survive indefinitely by surfacing with 1? But no reward. Need 6 for reward.
+
+Maybe simple policy can get some reward by firing enemies. Need not optimal.
+
+Given no testing, need ensure code compiles and within dims. Need use IR helpers. Need output build_policy only. It can import? The prompt says use following IR and backend. We need return code block defining build_policy() that returns MLPCompilerBackend.compile(program). It likely assumes MLPProgram and MLPCompilerBackend available in namespace. We can include imports? Maybe not. Should just define function. Could include from .ir import MLPProgram? But in their environment maybe already imported. The code block should be complete? It says Return one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program). Probably no imports needed, but can include if safe? If they execute in context with IR/backend defined, imports may fail if relative. Better not import. Just use MLPProgram, MLPCompilerBackend names.
+
+Need design program.
+
+Architecture 600->32->32->6. We can use up to 32 H1, 32 H2. Need maybe use 20 H1, 10 H2.
+
+Potential policy:
+- H1 detectors:
+  1. threat_count_high: sum channel1 > threshold (e.g., 2)
+  2. threat_count_any: sum channel1 > 0.5
+  3. target_count_any: sum channel2 > 0.5
+  4. diver_proxy: sum channel2 - sum channel1 > 0.5 (more targets than threats)
+  5. oxygen_low: absence of oxygen gauge col0? or col0-1? Use channel5 row9 col0 absent.
+  6. oxygen_medium: absence of col0-2? etc.
+  7. diver_gauge_high: presence of row9 col3? (diver_count>=6 if oxygen not masking? But OR with oxygen may make col3 active always if oxygen>=140. Not reliable. Maybe use col8? always if oxygen high or diver>=1. Not good.)
+  8. sub_at_surface? channel0 row0? Sub y=0 if channel0 in row0. Since sub occupies row y. We can detect sub_y=0 by sum channel0 row0 >0.5. But channel0 has two cells in row y. At surface row0. Good.
+  9. sub_near_bottom? row8? maybe.
+  10. friendly_bullet_count: sum channel3 >0.5.
+  11. trail? not needed.
+
+- H2 combine to action scores:
+  - If oxygen_low and sub_at_surface? no-op? If oxygen_low and not surface -> up.
+  - If threat_any -> fire? But if threat not in front, fire useless. Could still fire.
+  - If diver_proxy -> down? to collect.
+  - If threat_high -> up? avoid.
+  - Default no-op or down.
+
+But action selection: output logits from H2. We can set multiple rules adding weights. Need ensure one action high. Could use H2 units as action-specific scores, output W3 identity? For each action, set output rule with h2_terms. We can create H2 units:
+  - h2_fire: threat_any * 3 + target? - oxygen_low? etc.
+  - h2_up: oxygen_low*5 + threat_high*3 - sub_at_surface*5? (if at surface, up no-op? up at y=0 stays 0, safe? If surface True, up no terminal. If surface False and y=0, up stays 0 and triggers surface? Actually act: if a=='u': sub_y=max(0, sub_y-1). Then later if sub_y>0 oxygen-- else if not surface: surface logic. If at y=0 and surface False, any action (including up) triggers surface check. So up at surface with 0 divers terminal. Need avoid if no divers. But can't know. Maybe if sub_at_surface and not oxygen_low, no-op? But if surface False and at y=0, no-op also triggers surface check. So if at y=0 and surface False, any action will surface/terminal. Need be at y>0 to avoid. So if sub_at_surface, maybe move down to avoid surface check? But if surface True initial, down safe. If surface False at y=0, down moves to y=1 and avoids terminal? In act, movement happens before surface check. If a=='d', sub_y=1, then sub_y>0 oxygen-- surface=False, no terminal. So down is safe at y=0 even with 0 divers. Up/left/right/no-op at y=0 with surface False terminal if 0 divers. So policy should if sub_at_surface choose down (unless maybe want surface with divers). But we can't know divers. Could choose down always when sub_at_surface to avoid terminal. But then never surface for reward. Could maybe when diver_gauge_high choose up/no-op to surface. But gauge unreliable.
+
+Maybe use sub_at_surface detector: if true, action down (unless oxygen full? no). Starting at surface, down. Good.
+
+- If not at surface:
+  - If oxygen_low: up (to surface). But if no divers terminal. Could be bad. Maybe only if diver_gauge_high? But can't. Could choose up when oxygen very low to avoid oxygen death; if no divers terminal anyway. Maybe better than oxygen death? Both terminal. But if have divers, good.
+  - If threat_high: up? or move away. Up may surface terminal if no divers. Could choose fire.
+  - If diver_proxy: down? or fire? Need collect divers. Divers move horizontally; sub can move vertically and horizontally. Without direction, random. Could default down to go deeper where divers spawn? Divers spawn y 1-8. Starting y=0, down increases y. Good.
+  - If threat_any: fire.
+  - Default no-op or down.
+
+But with 32 H2, can make more nuanced: direction based on threat location relative to sub? Hard.
+
+Maybe use global centroid? H1 can compute weighted sums of x coordinates for threats and targets. Then H2 compare to sub x? Need sub x detector. Could compute sub_x via channel0 weighted by column. H1 threshold can output analog? tanh saturates, not good for analog. But RAW H1 can output tanh(linear) not saturated if small weights. We can use RAW units to compute approximate coordinates in [-1,1]. But H2 tanh also. Could compare.
+
+Idea: compute sub_x (0-9) normalized, threat_x, target_x. Then choose left/right based on target_x - sub_x. But H1 units are tanh of linear; if weights small, can be linear-ish. However input binary, sum up to 10. Need scale to [-1,1]. Use RAW with weights 0.1*col? tanh(0.1*sum) maybe. But H1 unit type RAW applies tanh after sum+bias. We can set weights to produce value proportional. But H2 uses tanh of weighted sum of h1. Could implement comparator: h2_left = tanh(gain*(sub_x - target_x) + bias). If h1 values approximate coordinates. But H1 tanh saturates if sum large. Use small weights.
+
+But 32 H1: can allocate:
+- sub_x: RAW weights channel0 col c = (c-4.5)*0.1? Sub has two cells front/back, average maybe. Sum ~ (x + back_x)*0.1. back_x = x±1. So approx x+0.5. Scale 0.1 -> 0.5. tanh ~0.46. Good.
+- sub_y: RAW weights channel0 row r = (r-4)*0.1? Sub two cells same row, sum 2*(r-4)*0.1 =0.2r-0.8. At y=0 -0.8 tanh -0.66; y=8 0.8 tanh 0.66.
+- threat_x: RAW weights channel1 col c = (c-4.5)*0.05? Threat count up to many, sum could large. Use 0.02.
+- threat_y: similar.
+- target_x, target_y.
+- diver_x? target - threat? Hard.
+- threat_count: THRESHOLD or RAW count*0.1.
+- target_count.
+- oxygen_low etc.
+
+Then H2:
+- left_score = gain*(sub_x - target_x) + maybe threat avoidance: if threat_x > sub_x, move left? Actually to avoid threat, move opposite threat: if threat_x > sub_x, left. So left_score = (sub_x - threat_x) + (sub_x - target_x)? Wait target (divers) want move toward: if target_x > sub_x, right. So left_score = (sub_x - target_x) + (sub_x - threat_x) (avoid threat). But target includes enemies too; channel2 includes enemies, so target_x may be enemies. Better use diver_proxy? Can't per x. Could use channel2 - channel1 per cell? H1 RAW can compute weighted sum of (channel2 - channel1) * col. That gives diver_x minus enemy_bullet_x. Let's call diver_x. Use weights +col on channel2, -col on channel1. Scale small. Then move toward diver_x. Avoid threat_x.
+- right_score = (target_x - sub_x) + (threat_x - sub_x)? Actually avoid threat: if threat_x < sub_x, move right. So right_score = (diver_x - sub_x) + (threat_x - sub_x)? If threat left, threat_x - sub_x negative, not good. Wait to avoid threat, move away: if threat_x > sub_x, left; if threat_x < sub_x, right. So right_score += (sub_x - threat_x)? No if threat left (threat_x<sub_x), sub_x-threat_x positive -> right. If threat right, negative -> left. So right_score += (sub_x - threat_x). left_score += (threat_x - sub_x). For target, move toward: if target_x > sub_x, right; so right_score += (target_x - sub_x); left_score += (sub_x - target_x). Good.
+- up_score: oxygen_low + threat_y? To avoid threat vertical: if threat_y > sub_y (below), up; if threat_y < sub_y (above), down. But surface at y=0. up_score += (threat_y - sub_y) + oxygen_low*large. down_score += (sub_y - threat_y) + maybe depth to collect.
+- fire_score: threat_count * large + maybe enemy in front? Could just threat_count.
+- no-op_score: baseline.
+
+But H2 units are tanh of linear combination of H1. We can create H2 units for each action score. Output rules can map H2 to logits with weights. Need ensure logits high for chosen action. If H2 values in [-1,1], output weights can scale. We can set output_bias maybe. For each action, set h2_terms {score_action: 5}. But if multiple scores positive, softmax chooses max. Need baseline no-op maybe 0.
+
+However H2 units can only take H1 terms, not other H2. So action scores computed directly from H1. That's fine.
+
+Need H1 units produce approximate coordinates and counts. But H1 tanh saturates; use small weights. Need be careful with RAW type: h1 = tanh(sum w_i x_i + bias). No gain parameter. We can set weights small. For threshold detectors, use THRESHOLD with gain.
+
+H1 budget 32. Let's allocate:
+1 sub_x_raw
+2 sub_y_raw
+3 threat_x_raw
+4 threat_y_raw
+5 diver_x_raw (channel2 - channel1 weighted col)
+6 diver_y_raw (channel2 - channel1 weighted row)
+7 threat_count_raw (sum channel1 * 0.1)
+8 target_count_raw (sum channel2 * 0.1)
+9 diver_count_raw (sum channel2 - channel1 *0.1)
+10 oxygen_low (threshold absence col0? maybe)
+11 oxygen_medium (absence col0-2?)
+12 sub_at_surface (threshold row0 channel0 >0.5)
+13 sub_at_bottom (threshold row8 channel0 >0.5)
+14 friendly_bullet_count_raw
+15 threat_near? maybe sum channel1 rows? Not.
+16 diver_gauge_high? maybe row9 col3 presence? But unreliable.
+17 oxygen_full? row9 col9 presence? maybe.
+18 threat_any threshold
+19 diver_any threshold
+20 target_any threshold
+... enough.
+
+But coordinate RAW with negative weights: For sub_x, channel0 has two cells. We want value around (x-4.5)*scale. If weights col c = (c-4.5)*0.1, sum for front x and back x±1. If orientation right (sub_or True, back_x=x-1), sum = (x-4.5 + x-1-4.5)*0.1 = (2x-11)*0.1 =0.2x-1.1. If orientation left (back_x=x+1), sum=(2x-8)*0.1=0.2x-0.8. At x=5, right: -0.1, left:0.2. Not centered. Could use only front? Can't distinguish front/back? channel0 OR front/back. Could use channel4 sub_back? obs channel4 includes trail | sub_back. But trail also. Maybe not.
+
+Could compute sub_x by sum channel0 col weights, but offset varies. For direction comparisons, offset may matter. Could calibrate: approximate sub_x = sum/0.2 + 0.95? But H1 tanh nonlinear. Maybe use weights 0.05 to keep linear. Sum range: x 0-9, back 0-9. Min sum weights if x=0 orientation left? back=1: (0-4.5 +1-4.5)*0.05 = -0.4. Max x=9 orientation right back=8: (4.5+3.5)*0.05=0.4. tanh ~0.38. Good. Value roughly 0.1*(x+back)-4.5? Actually 0.05*(2x+back_offset-9). Offset -1 or +1. So approx 0.1*(2x-9) ±0.05. For x=0: -0.9? Wait 0.05*(0+1-9)=-0.4. x=9:0.05*(9+8-9)=0.4. So range -0.4 to 0.4. Good. It is monotonic with x. We can use as sub_x signal.
+
+For threat_x: weights col c = (c-4.5)*0.02 maybe. If many threats, sum could exceed 1. Use 0.01. Threat count maybe up to 10. Sum max 10*4.5*0.01=0.45. Good. But if threats all one side, value. If no threats, 0. Good.
+
+For diver_x: weights +col on channel2, -col on channel1. Enemies cancel if same cell? Enemy fish/sub in both channel1 and channel2, so +col -col =0. Enemy bullets only channel1 -> negative. Divers only channel2 -> positive. So diver_x approx diver positions minus enemy bullets. Scale 0.02. If 6 divers, max 6*4.5*0.02=0.54. Good.
+
+For y coordinates: rows 0-9. Use (r-4)*scale. Sub_y: channel0 two cells same row, sum 2*(y-4)*scale. Use scale 0.05 -> range y0 -0.4, y8 0.4. Good. Threat_y scale 0.01. Diver_y scale 0.02.
+
+Counts: threat_count_raw: sum channel1 *0.05? Max maybe 20 ->1.0 tanh saturate. Use 0.02 -> max 0.4. target_count 0.02. diver_count_raw: sum channel2 - channel1 *0.05? Divers up to 6, enemy bullets negative. Use 0.1? If 6 ->0.6. Good.
+
+Threshold detectors:
+- sub_at_surface: channel0 row0 any. Use THRESHOLD input_weights row0 all cols channel0 =1, threshold=0.5, gain=10. Since two cells, sum 2 if surface. Good.
+- sub_at_bottom: row8 channel0 threshold 0.5.
+- threat_any: sum channel1 threshold 0.5 gain 10.
+- diver_any: sum channel2 - channel1 threshold 0.5? If one diver and no bullets, sum 1. If enemy bullets, maybe negative. Use threshold 0.5.
+- oxygen_low: Need detect low oxygen. Oxygen gauge row9 channel5. At oxygen=200, cols0-9 active. As decreases, high cols off. Low oxygen <20: col0 off? length = oxygen*10//200. For oxygen 19: 0 (since 190//200=0) col0 off. For oxygen 20:1 col0 on. So detect col0 absent. But channel5 OR diver gauge: diver gauge cols 3-8, so col0 only oxygen. Good. H1 THRESHOLD with input_weights {idx row9 col0 ch5: -1}, threshold=-0.5, gain=10. If present: -1 - (-0.5)=-0.5 -> -1; absent: 0+0.5=0.5 -> +1. Good. But if oxygen=0 terminal before? okay.
+- oxygen_medium: detect col0-2 absent? For oxygen <60? length <3. Use weights -1 on col0,1,2 threshold=-2.5? If all present sum=-3 -> -0.5; if at least one absent sum>=-2 -> +0.5. But if oxygen 199 length9 col0-2 present. Good. Could use for earlier surface.
+- oxygen_high? maybe col9 present? Not needed.
+- diver_gauge_six: detect row9 col3 present? Diver gauge for count>=6 includes col3. But oxygen gauge may also include col3 if oxygen>=140. At start oxygen full, col3 present even diver_count 0. So false. Could detect col3 present AND col0 absent? If oxygen low (<140) and diver_count>=6, col3 present due diver. But if oxygen low and no divers, col3 absent. Could make H1 AND? H1 AND gate over group_a col3 channel5, group_b absence? AND only positive inputs, cannot absence. Could use threshold: +1 col3, -1 col0? If oxygen low col0 absent, diver6 col3 present -> sum 1; threshold 0.5 -> +. If oxygen high col3 present col0 present ->0. If no diver oxygen low ->0. But if oxygen medium col0 present? For oxygen>=20 col0 present. So only when oxygen<20. Too late. Use col5? Diver6 col3, oxygen length >=? col5 present if oxygen>=120. To distinguish, need oxygen below 120 and diver6. Use +col3 -col5? If oxygen high both present 0; oxygen low col5 absent, diver6 col3 present ->1. But if no diver oxygen low 0. If diver5 col4 not col3. Good. But if oxygen between 120 and 200, col5 present, col3 present ->0. So detector diver6_when_oxygen<120. Could surface when oxygen low and have 6. But maybe too late. Use col4 for diver>=5 and col6 for oxygen>=160? +col4 -col6: if oxygen high both present 0; oxygen<160 and diver>=5 ->1. Could surface with 5? But reward only 6, and surface with 5 loses one ->4. Not good. Need 6.
+
+Maybe use diver gauge rightmost col8? Diver_count>=1 col8. Oxygen high col8 present. Need absence of oxygen col8? Oxygen length <9 when oxygen<180. +col8 -col9? If oxygen full both present 0; oxygen<180 and diver>=1 col8 present col9 absent ->1. But diver1. Not enough.
+
+Could detect diver_count via number of right gauge cells when oxygen low. But limited.
+
+Maybe ignore gauge, use diver_count_raw from channel2-channel1. If >=6, surface. But enemies/bullets interfere. Could threshold diver_count_raw >0.5 (approx 5 divers). Use H1 threshold: sum channel2 - channel1 > 5? Since each diver 1, enemy bullets negative. Use threshold 4.5. But if many enemy bullets, false negative. Still.
+
+H1 diver_count_high: input_weights +1 channel2 all cells, -1 channel1 all cells, threshold=4.5, gain=10. If 6 divers no bullets ->6 >4.5. Good. If 5 ->5 >4.5 maybe surface with 5 (bad). threshold 5.5 for 6. Use 5.5. But if one enemy bullet, 5 -> false. okay.
+
+- diver_count_any: threshold 0.5.
+
+H2 action scores. Need use H1 names. We can create H2 units:
+- score_noop: maybe baseline 0.5? But H2 tanh. Could set bias 0.5.
+- score_left: terms: sub_x - diver_x + threat_x - sub_x? Wait left_score = (sub_x - diver_x) + (threat_x - sub_x) = threat_x - diver_x. Interesting sub_x cancels. But if no threat, left if diver_x < sub_x? Actually left_score = sub_x - diver_x. If threat present, add threat_x - sub_x. So left_score = (sub_x - diver_x) + (threat_x - sub_x) = threat_x - diver_x. That loses sub_x if threat present? If threat_x=0, diver_x=8, left_score=-8? good. If threat_x=8, diver_x=0, left_score=8? good. But if no threat threat_x=0, left_score=-diver_x, not relative to sub_x. If sub_x=0, diver_x=8, left_score=-8 (right), good. If sub_x=8, diver_x=0, left_score=0? Should left strongly. Because threat_x=0, left_score=0, not sub_x-diver_x=8. So cancellation bad. Need keep sub_x term. H2 can sum multiple H1: left_score = (sub_x - diver_x) + alpha*(threat_x - sub_x). That's fine: terms sub_x: 1 - alpha, diver_x: -1, threat_x: alpha. Choose alpha=0.5. left = 0.5*sub_x - diver_x +0.5*threat_x. If no threat, left =0.5 sub_x - diver_x. If sub_x=8, diver=0 ->4

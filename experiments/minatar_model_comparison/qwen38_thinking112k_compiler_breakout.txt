@@ -1,0 +1,1510 @@
+We need answer user's task. Need produce final response: brief design then edits block? User says: "First describe your design briefly (the strategy, and what the hidden units compute), then write the edits block." Then later: "Use the following NeuralCompiler IR and backend to build a policy. Return one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program). Do not train, test, run model forward passes or use feedback." There is conflict: earlier asks edits block with raw weights; later asks use IR and backend, return one complete Python code block defining build_policy() returning compiled program. Need satisfy likely final expected: provide Python code block with build_policy using IR. But also maybe they want edits block? The prompt includes both: "HOW TO WRITE THE WEIGHTS ... Write a code block whose opening line is three backticks followed by the word edits" and then "Use the following NeuralCompiler IR and backend to build a policy. Return one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program)." The final instruction likely overrides: return one complete Python code block defining build_policy. But initial says first describe design then edits block. Need decide. The user likely expects final answer with design and code block (maybe edits? or build_policy?). The last paragraph is explicit: "Use the following NeuralCompiler IR and backend to build a policy. Return one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program). Do not train, test, run model forward passes or use feedback." So final should include brief design and a Python code block defining build_policy. But maybe they also require edits block? It says only LAST edits block read. However final instruction says return one complete Python code block. Could include both? "Return one complete Python code block" maybe only one code block. But earlier "then write the edits block". We need maximize compliance. Could provide design, then a Python code block that defines build_policy and also maybe includes an edits block? But "one complete Python code block" suggests no separate edits. Yet scoring may parse edits block? The prompt is a meta task: write weights from scratch, no tools. It gives IR/backend to build policy. It may expect code using IR, not raw edits. But the "HOW TO WRITE THE WEIGHTS" says edits block. The final says use IR and backend. Maybe they want the code block to be the edits block? No, "Use the following NeuralCompiler IR and backend to build a policy. Return one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program)." That is likely the actual required output for this environment. We can include design then code block with build_policy. But if evaluator expects edits block, it may fail. Could include both: a Python code block with build_policy, and inside or after an edits block? But "one complete Python code block" maybe not. The final answer can have a short design and then a code block. The code block can be Python defining build_policy. It can also include a raw edits block as a string? But not needed.
+
+Need design a policy for MinAtar Breakout. Need handcraft weights. We can use IR to define units. Need think deeply about game and network constraints.
+
+Game: 10x10, paddle at row 9 pos. Ball moves diagonally. Ball starts at (3,0) dir 2 (down-right) or (3,9) dir 3 (down-left). Paddle pos 4. Bricks rows 1-3 all 10. Ball moves one diagonal per step. Paddle moves one cell per action (sticky 0.1 repeat previous). Actions: left/right/noop. Need maximize score. We can design deterministic policy approximating optimal: move paddle to intercept ball's future x at row 9, considering reflections and brick bounces? Since ball diagonal, x changes ±1 each step. Paddle speed 1. Need catch. If ball moving down, we need be at predicted x when ball reaches row 9. If ball moving up, can wait or position. Bricks reflect vertical direction when hit, but x direction unchanged. Walls reflect x direction. Ball can bounce between bricks and walls. Need survive.
+
+Observation: ball current, trail previous. From ball and trail can infer direction: if trail is up-left relative? Actually trail is previous cell. Ball moves diagonally. If ball at (y,x), trail at (last_y,last_x). Direction vector = ball - trail: dy = ±1, dx = ±1. So can infer. Paddle pos known. Bricks known.
+
+Network: 600 inputs, 32 h1 tanh, 32 h2 tanh, 6 outputs. Need handcraft. We can use threshold units to detect ball x, paddle x, direction, etc. But only 32 h1 and 32 h2. Need efficient.
+
+Could design policy: always move toward predicted landing x. Need compute predicted x at row 9 from current ball and direction, with wall reflections. Since ball diagonal, if moving down (dy=+1), time to row 9 = 9 - y. x_t = x + t*dx, with reflections at 0/9. Paddle should move toward x_t. If moving up, maybe move toward current x or predicted after top bounce? Could just move toward ball x. But to break bricks, need catch. A simple policy: if ball moving down, move toward reflected x at row 9; if moving up, move toward ball x (or predicted after top reflection). This may be decent.
+
+Need implement in MLP with limited units. We can compute ball x and paddle x as analog values? Inputs are one-hot positions. We can create h1 units that output ball_x (0..9) and paddle_x (0..9) as linear sums. But tanh saturates; if we use small weights, h1 approximates value? For x in 0..9, tanh(0.1*x) not linear enough. But we can use threshold bits to represent x in binary or one-hot. Need compare ball_x vs target.
+
+Alternative: For each possible paddle position p and ball state, decide left/right/noop. Could use lookup? 10 paddle positions, ball positions 100, directions 4, bricks irrelevant maybe. Too many. But can compute target x with wall reflection using modular arithmetic.
+
+Maybe design policy based on relative position: move left if predicted target < paddle, right if >, else noop. Need compute sign(target - paddle). Target = f(ball_x, ball_dir_x, ball_y, ball_dir_y). If ball moving down: t=9-y. target = reflect(x + t*dx). If moving up: maybe target = reflect(x + (y+?)*dx?) Let's derive.
+
+Ball direction encoded by dx, dy. If dy=+1 (down), time to bottom = 9-y. If dy=-1 (up), it will hit top after y steps, then down. If no bricks, total time to bottom = y + 18? Actually from y moving up: reaches y=0 after y steps, then from y=0 to 9 after 9 steps? But at y=0 reflection: if new_y<0, set 0 and dir vertical flips. It takes y steps to reach y=0? Example y=3, dir up: step1 y=2, step2 y=1, step3 y=0, step4 y=1 (down). To reach y=9: 3 + 9 = 12? From y=0 after 3 steps, then 9 steps to y=9, total 12. Formula t = y + 9 if moving up? For y=3, 12 yes. If at y=0 moving up? It will next y=0? Actually if ball_y=0 and dir up, new_y=-1 -> set 0, vertical flip, so stays y=0 for one step? In code: if new_y<0: new_y=0, dir flip. So from y=0 up, after 1 step y=0 down. Then 9 steps to bottom: total 10. Formula y+9 =9, off by 1. But ball at y=0 moving up rare? Could happen after top bounce? It sets new_y=0 and dir down in same step, so observation after step has y=0, dir down (trail y=0? last_y maybe 0? Actually last_y old 0, new_y 0, trail at same cell? state trail = last_y,last_x = 0, ball=0, trail same? Direction inference ambiguous. But code: if ball at y=0 moving up, last_y=0, new_y=0, trail same as ball. Then direction cannot be inferred from trail? It will be down next. But observation has ball and trail same; our direction inference may fail. However such state occurs one step. Could handle by using trail? If trail same, maybe assume down? But not critical.
+
+Bricks: ball hitting brick reflects vertical, stays at last_y (doesn't enter brick). This changes time to bottom unpredictably depending on bricks. But if we just track current ball and direction, after brick bounce direction dy flips, y remains previous (above brick). So our formula from current state still valid for future if bricks absent? But bricks may cause additional bounces. However target at bottom with wall reflections and current direction is still valid if no more brick hits? If there are bricks in path, ball may bounce and change dy, but x direction unchanged. The x coordinate at bottom may be different? Let's analyze: Ball diagonal, x changes ±1 each step regardless of vertical reflections. Time to bottom depends on vertical bounces. Bricks can add delays (vertical flip) but x continues. If we compute target assuming no more brick hits, may be wrong if ball hits brick. But maybe bricks near top; ball moving down from below bricks? If ball is below bricks (y>3) moving down, no bricks, target formula good. If ball moving up, it will hit bricks likely, causing bounce down, changing time. But maybe simple policy still okay.
+
+Could design more robust: always move toward ball's current x when ball moving up, and toward predicted bottom x when moving down. This is common.
+
+Need implement sign(target - paddle). We can compute target_x as one of 0..9. Need compare to paddle_x. Could create h1 units for each possible target? Or compute difference via linear weights.
+
+Since only 32 h1, we can allocate:
+- 10 units for ball_x one-hot? Actually input already has ball channel one-hot. We can use h1 to compute ball_x numeric with weights 0..9 and small gain? But tanh. Could use threshold bits: 4 bits for ball_x, 4 bits for paddle_x, direction bits, etc. But h1 limited.
+
+Maybe use h1 units as linear analog with gain small enough to stay in linear region? tanh(z) ~ z for |z|<1. If we want value 0..9, can't. But we can scale to [-1,1]: (x-4.5)/4.5. Use weights (c-4.5)/4.5 for ball channel. Then h1 ~ tanh(scaled) not exactly but monotonic. For comparison, maybe enough? But need precise. Could use threshold units to detect x >= k for k=1..9 (8 units) for ball and paddle? Too many.
+
+Alternative: Use h1 units to compute "move left" and "move right" directly via weighted sums over inputs. Since policy is simple, we can set output logits as linear function of inputs through h1/h2. But h1 tanh nonlinearity can implement piecewise.
+
+Maybe design a lookup table for paddle position and ball x/direction. We can use h1 units to detect paddle position (10 one-hot) and ball direction (4) and ball x? But inputs already one-hot; h2 can combine.
+
+Network: h1 = tanh(W1 x + b1). We can set h1 units to pass input features (e.g., paddle one-hot, ball one-hot, direction) with high gain to make them saturated. But 32 units only. Could use h1 units as:
+- 10 paddle position detectors (paddle_x = c) (input channel 0 row9 col c)
+- 4 direction detectors (from ball/trail relative)
+- maybe 10 ball x detectors? Too many (24). Leaves 8.
+But h2 can combine paddle and ball positions without h1? h2 only sees h1, not inputs. So all input features must be in h1. Need enough h1 to represent state.
+
+Could use h1 units to compute numeric ball_x and paddle_x as analog (2 units), direction bits (2 units), ball_y maybe (1), ball moving down (1). That's 6. Then h2 can compute target and compare. But analog through tanh may be imprecise. We can use multiple h1 units to encode x in binary with threshold detectors. For 0..9 need 4 bits each for ball and paddle =8, plus direction 2, y maybe 4? total 14. h2 can compute target bits? Hard.
+
+Maybe use h1 units as "ball_x - paddle_x" sign? We can directly compute difference using weights: ball channel weights +c, paddle channel weights -c. Then h1 = tanh(gain*(ball_x - paddle_x)). This gives sign of ball_x - paddle_x. But target may differ from ball_x. For moving down, target = reflect(ball_x + t*dx). Could compute target - paddle directly with weights depending on direction and y. We can create h1 units for each direction/y? Let's explore.
+
+We need output left if target < paddle, right if target > paddle. We can compute D = target - paddle. If D<0 left, >0 right. target is function of ball_x, ball_y, dx, dy. We can create h1 units that compute D for each possible direction? For each dx,dy, D = reflect(x + t*dx) - p. Reflection makes piecewise. But maybe we can avoid reflection by using "unreflected" target and wall handling? If ball near wall, target may reflect. Could create units for each possible target? Hmm.
+
+Maybe simpler: policy: move toward ball's current x, not predicted. This only needs sign(ball_x - paddle_x). That can be one h1 unit: tanh(gain*(ball_x - paddle_x)). Then output left if negative, right if positive. This will catch ball if ball moving down and paddle can keep up? If ball x changes ±1 per step, paddle moves ±1 per step. If always move toward current ball x, when ball moving down, the ball's x at bottom may be ahead; but paddle tracks current x, so if ball and paddle have same x when ball reaches bottom? Let's simulate: ball at y=3, x=0, dx=+1, paddle p=4. Move left each step. Step1 ball x=1,y=4, p=3; step2 x=2,y=5,p=2; step3 x=3,y=6,p=1; step4 x=4,y=7,p=0; step5 x=5,y=8,p=0 (can't left); step6 x=6,y=9,p=0 miss. So tracking current x fails if ball starts far and moving away. Need predict.
+
+Could move toward predicted x at bottom. Need compute.
+
+Maybe use "shadow" of ball: if ball moving down, target x = (x + (9-y)*dx) reflected. Since paddle speed equals ball horizontal speed, if target is reachable? It is always reachable if start early enough? Paddle may need move up to 9 steps. Ball from y=3 to 9 takes 6 steps, paddle can move 6. If target far >6 from p, may miss. But optimal can choose? Actually if ball moving down from top, paddle has limited time. Need be positioned. A good policy when ball moving up is to preposition to predicted bottom x after top bounce/bricks.
+
+Could design policy using current ball direction:
+- If ball moving down: move toward target_bottom = reflect(x + (9-y)*dx).
+- If ball moving up: move toward target_after_top = reflect(x + (y+9)*dx) maybe (or y+10 if y=0). This is where ball will be at bottom if no bricks. But bricks will bounce it down earlier, maybe target different. However moving up, ball will hit bricks at rows 1-3, reflect down. The x at bottom after brick bounce depends on brick hit. But if we aim for no-brick top bounce, maybe okay? Let's analyze. Ball moving up from below bricks (y>3). It will hit a brick at row 3? If brick present at (3, x_hit). It bounces down at y=3? Code: if new_y brick, new_y=last_y (which is 4 if coming from y=4 to 3), dir vertical flip. So it bounces at y=4? Actually if ball at y=4 moving up, new_y=3 brick, last_y=4, set new_y=4, dir down. So it never enters row3; bounces at row4. Then time to bottom = 9-4=5. x continues. Target = reflect(x + (5)*dx) from current? If current y=4, dx same. If we instead use top bounce formula y+9=13, too far. So bricks matter. But if all bricks present, ball moving up will bounce at row4 (if path has brick at row3). If some bricks broken, may go higher. Hard.
+
+Maybe a robust policy: always move toward ball's x when ball is moving up? But then when it bounces down, may be too late. Need anticipate.
+
+Could use a simple "follow the ball's x with a lead" based on direction: if dx=+1, move right; if dx=-1, move left, regardless of y? That is, match ball horizontal direction. If ball moving right, paddle moves right; if left, paddle moves left. This keeps relative x constant? If ball dx=+1 and paddle moves right, both x increase 1 per step, so difference constant. If ball moving down, when it reaches bottom, paddle x = initial p + t, ball x = initial x + t (reflections aside), so difference constant. If initial difference 0, catch. If not, miss. But if ball moving up, same. With wall reflections, if ball hits wall, dx flips; paddle should flip too. This policy is like mirror ball horizontal direction. It may be good if paddle initially aligned? But start p=4, ball x=0 or9, difference not zero. Need adjust to align. Could move toward ball when not aligned, then follow direction.
+
+Maybe optimal: move toward predicted target, which is equivalent to aligning with ball's horizontal trajectory. We can compute target and move toward it.
+
+Given limited network, maybe we can implement a lookup for target based on ball position and direction, ignoring bricks. There are 100 ball positions *4 directions =400 possible target x. But we can compute with arithmetic.
+
+Can we implement arithmetic in 2-layer tanh MLP with 32 units? We can use h1 to compute linear features, h2 to combine. Since tanh is smooth, we can approximate piecewise linear. But handcraft exact? We can use high-gain threshold units to implement digital logic. 32 units may be enough for a simple policy.
+
+Let's consider using h1 units as one-hot detectors for ball x (10) and paddle x (10) and direction (4) =24. h2 can compute target? h2 units can combine one-hot ball x and direction to produce target one-hot? But h2 only 32 units, output 6. We can set output logits directly from h2 units that represent "should left/right". For each paddle position p and target t, left if t<p. We could create h2 units for each p? Maybe use h1 paddle one-hot and h1 target one-hot. Need target one-hot in h1 or h2.
+
+If h1 has ball_x one-hot (10) and direction (4), h2 can compute target_x one-hot (10) by linear combination: for each target t, h2[t] = sum over ball_x,dir where target=t of weights. But h2 tanh; can make saturated. Then output left = sum_{t<p} target_t - sum_{t>=p}? Need paddle p. h1 has paddle one-hot. h2 can compute left/right by combining target one-hot and paddle one-hot. But h2 units limited: 10 target + maybe 2 left/right =12. h1 24. Total okay. But h1 direction detectors? Need infer direction from ball and trail. We can create 4 h1 units for direction using ball/trail inputs. But direction can be inferred by relative positions: ball at (y,x), trail at (y±1,x±1). We can detect dx and dy. Need 2 bits: dx sign, dy sign. Could create h1 units:
+- dx_right: ball_x - trail_x >0. Since one-hot, sum ball channel weights +c, trail channel weights -c, threshold 0.5. But if trail same (top bounce) ambiguous. Use gain.
+- dy_down: ball_y - trail_y >0.
+Then direction = (dx,dy). 2 units.
+But h1 also needs ball_x one-hot? Inputs already one-hot but h2 cannot see inputs. We can pass ball_x one-hot through h1: 10 units, each weight 1 on ball channel at col c, high gain? If input 1, tanh(gain) ~1; else 0. But if multiple? one-hot. Use gain 5. Similarly paddle_x one-hot: 10 units from paddle channel row9 col c. That's 20. Plus dx,dy =22. Leaves 10 h1. Good.
+
+h2: Need target_x one-hot (10) computed from ball_x one-hot, dy_down, dx_right, and maybe ball_y? Target depends on y too. If we ignore y, target not correct. Need include ball_y. Could use ball_y one-hot (10) in h1, total 32 exactly? 10 ball_x +10 paddle_x +10 ball_y +2 dir =32. No h1 left. h2 32. We can compute target one-hot (10) and left/right (2) =12. Good. But h2 target computation must use ball_x, ball_y, dx,dy. h2 units can be linear combinations of h1. We can set for each target t a h2 unit that saturates if (ball_x, ball_y, dx,dy) maps to t. This is a lookup table of 400 combinations to 10 targets. We can compute weights: for each h1 unit representing ball_x=c, ball_y=r, dx=+1/-1, dy=+1/-1, if target(t; c,r,dx,dy)=t, add weight. But h1 units are saturated one-hot/direction. For a given state, h1 has exactly one ball_x=1, one ball_y=1, one paddle_x=1, dx=±1, dy=±1 (assuming direction bits are +1/-1? We can make dx unit output +1 if right, -1 if left? Or one-hot? Let's design).
+
+If h1 units are one-hot with values ~1 for true, ~0 for false. For direction, we can have dx_right (1 if right, 0 if left) and dy_down (1 if down, 0 if up). Then target lookup can use weights for combinations. For each target t, h2 pre-activation = sum over ball_x c, ball_y r, dx d, dy e of w * h1[c]*? But h2 is linear in h1, not products. It cannot multiply ball_x and dx. A single h2 unit summing h1 features cannot implement a lookup that depends on conjunction of ball_x and dx unless we have h1 units for conjunctions. Because h2 linear combination of h1 one-hots: if ball_x=3 and dx=1, both h1[ball_x3]=1 and h1[dx1]=1, sum includes both, but cannot distinguish ball_x=3, dx=1 from ball_x=3, dx=0 plus ball_x=4, dx=1 etc. It can only sum independent features. To implement target = f(x,y,dx,dy), need interactions. h1 could compute conjunctions: e.g., for each x and dx? 10*2=20, plus y? Too many. Or h1 can compute numeric x and dx, then h2 can multiply? h2 linear in h1, no multiplication either. Two-layer MLP with h1 tanh can implement interactions if h1 units are nonlinear functions of inputs, e.g., h1 units for x*dx? But h1 is linear+ tanh of inputs, can compute threshold of linear combinations, not arbitrary product. But we can create h1 units that directly compute target one-hot? Maybe h1 can compute target_x for each t using linear weights over ball/trail/paddle? Target is piecewise linear in x,y,dx,dy. Since dx,dy are determined by ball-trail difference, which is linear in inputs. We might compute D = target - paddle directly as a linear function for each quadrant? Let's examine.
+
+Target without reflection: if dy=down: t = x + (9-y)*dx. This is linear in x,y,dx. dx is sign of x - trail_x. But if we know dx as ±1, t = x + (9-y)*dx. This is not linear in inputs if dx is sign, but we can create separate h1 units for each dx case: for dx=+1, t = x + 9 - y; for dx=-1, t = x -9 + y. These are linear in ball_x, ball_y. We can compute t - p = (x - p) + (9-y)*dx. For dx=+1: D = x - p + 9 - y. For dx=-1: D = x - p -9 + y. With reflection, piecewise.
+
+Could create h1 units that compute D for each dx/dy? h1 can compute linear combination of inputs: ball_x weights +c, paddle_x -c, ball_y weights ∓r, plus bias. Then tanh(gain*D) gives sign. That's promising! We don't need target one-hot. We can create h1 units for sign of D under assumptions of direction. But direction itself is from inputs. We can create h1 units:
+- D_down_right = ball_x - paddle_x + 9 - ball_y (for dx=+1, dy=down, no reflection)
+- D_down_left = ball_x - paddle_x - 9 + ball_y (dx=-1, dy=down)
+- D_up_right = ball_x - paddle_x + (y+9?) - ball_y? If moving up no bricks: time = y+9? D = x - p + (y+9)*dx? For dx=+1: x - p + y + 9. For dx=-1: x - p - y -9.
+But these are linear in ball_x, paddle_x, ball_y. h1 can compute them. Then h2 can select based on direction and maybe reflection. But reflection at walls makes D not simply linear; target = reflect(x + t*dx). However D sign may still be computed by considering wall bounces. Could create more h1 units for reflected cases.
+
+Maybe we can ignore wall reflection? If ball near wall, target may be wrong. But maybe policy can handle by moving toward ball direction? Need robust.
+
+Let's derive exact target with wall reflection for diagonal ball. x evolves with dx=±1, reflecting at 0 and 9. This is equivalent to x_t = reflect(x + t*dx) where reflect maps integer to [0,9] via triangular wave. For t up to maybe 18. We can compute target for each x,y,dx,dy. Could create h1 units for sign of target - paddle for each of 4 directions and maybe y? But target depends on y linearly in t. We can compute D = target - p. For fixed dx,dy, target is a piecewise linear function of x and y (t). Since p is input one-hot, D = target - p. We can create h1 units that compute D for each direction using weights over ball_x, ball_y, paddle_x. But target piecewise due to reflection; can represent as min/max? With tanh threshold, maybe create multiple h1 units for each segment.
+
+Alternative: Use h1 units to compute "unreflected coordinate" u = x + t*dx, then target = reflect(u). We can compute sign(target - p) by checking if u modulo 20 falls in intervals. For p 0..9, target = p if u mod 20 in [p, p] or [19-p,19-p]? Actually triangular wave: reflect(u) = p for u ≡ p mod 20 or u ≡ 20-p mod 20 (with p=0 or9 special). target < p if u mod 20 in certain intervals. Could implement with threshold units on u and u+? But u can be negative. t depends on y. u = x + (9-y)*dx for down. For dx=+1: u = x + 9 - y. Range x 0..9, y 0..9 => 0..18. For dx=-1: u = x -9 + y, range -9..9. Reflect. For up: t = y+9 (or y+10 at y=0) => u range larger 0..27 or -27..9. But bricks complicate.
+
+Maybe we can design a policy that doesn't need exact target: use "move in direction of ball's horizontal velocity if ball is below bricks, else move toward center?" Let's think about game dynamics and optimal strategy.
+
+Breakout MinAtar: ball starts at top corners moving down. Paddle at 4. Bricks rows 1-3. Ball will hit bricks immediately? Start (3,0) dir down-right: step1 (4,1) no brick (row4), then down to bottom. It doesn't hit bricks because starts at row3 (bottom brick row) moving down, leaves brick area. To break bricks, ball must be moving up and hit bricks. So after first bounce, ball moving up, will hit bricks. The ball's x direction remains same until wall. Paddle must catch and aim ball to break bricks. In Breakout, hitting paddle side determines outgoing dx: if ball hits left side of paddle (new_x == pos? code: if ball_x == pos: dir vertical flip only, dx unchanged? Let's parse paddle collision:
+if new_y == 9:
+ if ball_x == pos: ball_dir = [3,2,1,0][dir] (vertical flip, dx unchanged)
+ elif new_x == pos: ball_dir = [2,3,0,1][dir] (horizontal flip? mapping: dir 0 (up-left) ->2 (down-right)? Wait [2,3,0,1] applied to current dir. If ball moving down-left (dir3) and new_x==pos (left side?), mapping 3->1 (up-right). If moving down-right (dir2) and new_x==pos (right side?), mapping 2->3 (up-left). So hitting side reverses dx. If ball_x==pos (center? ball current x equals paddle before move? Actually ball_x old, new_x maybe pos? It checks old ball_x == pos first, then new_x == pos. If old ball_x == pos, vertical flip only. If new_x == pos, horizontal flip. This means if ball lands on paddle cell? It can catch if old x or new x equals paddle. Outgoing dx depends on side: if new_x == pos and old x != pos, dx flips. So to aim ball left/right, paddle position relative to ball path matters.
+
+A good policy may need aim ball to break bricks, not just catch. But score per episode maybe can be high with simple catch and random brick breaks. Need beat RL? Maybe not, but task says as well as possible. Handcrafted can be decent.
+
+Could implement a known simple policy: move paddle to ball's x when ball moving down; when ball moving up, move to center or predicted x. But to break bricks, need bounce ball upward at certain x. If paddle always under ball, ball returns same dx, may break some bricks.
+
+Let's consider deterministic optimal-ish strategy: Since ball diagonal and paddle speed equal, to catch a down-moving ball, paddle must be at target x at bottom. If paddle is at target, catch. Outgoing dx: if ball's old x == paddle (i.e., ball directly above paddle) then dx unchanged; if new_x == paddle (ball approaches from side) then dx flips. If target equals paddle, both old? At bottom step, ball at y=8, x = target ±1? Suppose ball moving down-right, target x = p. At y=8, x = p-1, new_x=p. old ball_x != p, new_x==p => dx flips to left. So ball goes up-left. If ball moving down-left, target p, at y=8 x=p+1, new_x=p => dx flips to right. So catching at target causes dx to flip, sending ball back toward center? If ball directly above paddle (old x=p) at y=8? That would mean target p+dx? Not catch? If old x=p and new_x=p+dx, if dx=+1 new_x=p+1 not paddle unless p+1? So old x==p case occurs if ball is above paddle and moving horizontally away? It will miss unless paddle moves? Actually if ball at y=8 x=p, moving down-right, new_x=p+1, new_y=9. ball_x old == pos, so catch and dx unchanged (right). So if ball is above paddle, it catches and continues same dx. This can happen if paddle tracks current x.
+
+To break bricks, maybe want ball to go up and hit bricks. Any catch sends up. The dx after catch determines which side. It will hit walls/bricks.
+
+Maybe a simple policy: always move to predicted bottom x. This ensures catch (if no brick delays) and ball bounces up with dx flipped (unless directly above). It will break bricks eventually.
+
+Need implement predicted bottom x. Could use a lookup table in h1? Let's explore digital implementation with 32 h1, 32 h2.
+
+Option: Use h1 units to compute 10 possible "target x" one-hot directly from inputs via linear threshold? For each target t, define h1[t] = tanh(gain * (I(target=t) - 0.5)). But I(target=t) is a Boolean function of ball position/direction. Can a single linear threshold over inputs implement it? Target=t is a set of ball states (x,y,dx,dy) that map to t. Is that set linearly separable in the 600-dim one-hot space? Maybe for each t, the set is union of diagonals. Could be not linearly separable with one unit. But we can use multiple h1 units per target? Not enough.
+
+Option: Use h1 units to compute numeric features: ball_x, ball_y, paddle_x, dx, dy. Then h2 can compute target sign via linear combination? But h2 linear in h1, no multiplication. However if h1 features are analog values (not one-hot), h2 linear combination can compute e.g., D = ball_x - paddle_x + (9-ball_y)*dx if dx is analog ±1. But h1 cannot compute product (9-ball_y)*dx because h1 is linear in inputs. But we can create h1 units for each product term: for dx=+1, feature A = ball_x - ball_y; for dx=-1, feature B = ball_x + ball_y. But selecting based on dx requires multiplication in h2. If h1 has dx sign and A/B, h2 linear cannot multiply dx*A. But we can create h1 units that already incorporate dx: e.g., h1[down_right_D] = tanh(gain*(ball_x - paddle_x + 9 - ball_y)) but this is active regardless of dx. h2 can gate by dx? h2 linear cannot multiply gate and D unless D unit is only active when dx condition? h1 can compute D only when dx condition by using threshold on combined linear form? For dx=+1, condition is ball_x > trail_x. D = x - p + 9 - y. We want h1 = sign(D) if dx=+1 and dy=down, else 0. Can a single linear threshold over inputs implement sign(D) AND dx=+1 AND dy=down? The set {dx=+1, dy=down, D>0} may be linearly separable? Maybe with high gain, we can use a linear combination that includes a large penalty if dx not +1 or dy not down, plus D. For example z = M*(dx_indicator + dy_indicator -1) + D. If dx_indicator and dy_indicator are not linear but can be represented by ball/trail differences. dx_indicator = I(x > trail_x). In one-hot inputs, x - trail_x is linear: sum c*ball_c - c*trail_c. It is +1 if dx=+1, -1 if dx=-1, 0 if same. dy similarly. We can use z = M*( (x - trail_x) + (y - trail_y) )? For dx=+1,dy=down, x-trail=1,y-trail=1 sum=2. For other directions sum 0 or -2. Add D. If M large, z positive only for down-right and D not too negative. But to get sign of D, we need z = D + M*(direction_match - 1). If direction_match=2, z=D+M; if not, z<=D-M. With M > max|D| (~18), then z positive iff direction match and D>0? Actually if direction match, z=D+M, positive for D>-M (always), not sign of D. We need output sign of D, not just positive. Could set z = D + M*(direction_match - 1) but if direction match, z ~ M + D, saturated positive regardless of D sign. Not good.
+
+Could create two units per direction: one for D>0, one for D<0, with thresholds. For down-right, D>0 set: {dx=+1,dy=down, x-p+9-y>0}. Is this linearly separable? We can use z = (x-p+9-y) + M*(dx+dy -2). For down-right, z=D. For other directions, z <= D - M (if dx+dy <=0) or D? If dx=+1,dy=up: dx+dy=0, z=D-2M negative if M large. If dx=-1,dy=down: 0, negative. If up-left: -2, negative. So z positive iff down-right and D>0, provided M > max|D|. Great! Similarly D<0: z = -(x-p+9-y) + M*(dx+dy -2) positive iff down-right and D<0. This can be implemented as h1 linear threshold! Because dx+dy can be computed linearly from ball/trail coordinates: (x - trail_x) + (y - trail_y). For down-right, =2. For down-left/up-right =0, up-left=-2. If we want down-left, use (x - trail_x) - (y - trail_y)? Let's define direction match linear scores.
+
+This is promising. We can create h1 units that compute sign of D for each of four directions (or just down directions) using linear forms with large direction penalty. h1 = tanh(gain * z) where z = ±D + M*(dir_score - 2). If dir_score=2 for desired direction, z=±D; else z <= ±D - M, saturated negative if M large. Then h1 outputs +1 if desired direction and D sign, else -1 (or near -1). We can use these as "move right" / "move left" indicators.
+
+Need D exact with wall reflection? We can start with no reflection D = x - p + t*dx. But wall reflection can make sign wrong. We can incorporate reflection by using multiple D segments? Maybe we can compute target sign exactly using linear forms with direction and wall conditions. Let's analyze.
+
+For down-moving ball, t = 9 - y (if y<9; if y=9 terminal? not). D_no_reflect = x - p + t*dx. Target = reflect(u) where u = x + t*dx. We need sign(reflect(u) - p). p is paddle x. Instead of computing target, we can determine if target < p or > p based on u modulo 20. For p known, target < p iff u mod 20 in [0, p-1] or [20-p+1,19]? Let's derive triangular wave f(u) for u integer, f(u)=u for 0<=u<=9, f(u)=18-u for 10<=u<=18, f(u)=u-20 for 20<=u<=29? Actually period 20: f(u) = u mod 20 if <=9 else 18 - (u mod 20). For negative, can add 20. target < p if f(u) < p. For p=0, none. For p>0, in each period, f(u)<p for u mod 20 in [0,p-1] and [20-p+1,19]? Check p=4: f<4 for m=0,1,2,3 and m=16,17,18,19? f(16)=2,17=1,18=0,19? m=19 -> 18-19=-1? Wait period 20: m 0..19, f(m)=m for 0..9, f(m)=18-m for 10..18, f(19)=? 18-19=-1 invalid. Actually triangular wave with endpoints 0 and9: period 18? Let's check reflection at 0 and9: sequence x: 0,1,2,3,4,5,6,7,8,9,8,7,6,5,4,3,2,1,0,1,... Period 18? From 0 to 0: 0->1 (1), ... 0->9 (9), 9->8 (10), ... 9->0 (18). Yes period 18, not 20. Because width 10, bounce length 18. Formula f(u) = u mod 18; if m<=9 f=m else f=18-m. For m=18 ->0. Good. So period 18. target < p if m in [0,p-1] or [19-p,17]? For p=4: m 0,1,2,3 and m 15,16,17? f(15)=3,16=2,17=1. m=18 f=0 <4 too. Wait 18-m for m=10..18: m=18 f=0. So interval [18-p,18]? For p=4: m=14? f(14)=4 not <; m=15,16,17,18 f=3,2,1,0. So [18-p+1? 15 to18] length p. General f<p for m=0..p-1 and m=19-p? Let's solve 18-m < p => m > 18-p. integer m >=19-p. up to18. So [19-p,18]. For p=4: 15..18. Good. For p=0: none; p=9: f<9 for m=1..8 and m=10..17? m=0 f0<9, m=9 f9 not, m=18 f0<9. Actually p=9: m=0..8 and m=10..18? 19-p=10..18. Good.
+
+So target sign depends on u mod 18. u range for down: if dx=+1, u=x+9-y, x0..9,y0..9 => 0..18. If dx=-1, u=x-9+y => -9..9. We can shift to nonnegative. For dx=+1, u in 0..18 exactly one period. target = f(u). For dx=-1, u in -9..9; add 18 => 9..27, spans. Could handle.
+
+Can we compute sign(target-p) with linear threshold using u and p? Since u range small, maybe create h1 units for each possible u? But u is linear in x,y. We can compute u value analog? Or threshold units for u intervals. For each direction and p? p is input one-hot, can include -p in linear form. D_reflect sign is not linear in u and p due to modulo, but u range limited to one or two periods. We can create h1 units for each segment where target-p sign is linear.
+
+For down-right (dx=+1, dy=down): u = x + 9 - y (0..18). target f(u). We need right if target > p, left if target < p. For a fixed p, target > p intervals. But p is variable input; we can include -p in linear form. For segment u in 0..9: target=u, sign = u - p = x+9-y-p. Linear! For segment u in 10..18: target=18-u, sign = 18-u - p = 18 - x -9 + y - p = 9 - x + y - p. Linear! So we can create h1 units for down-right:
+- DR_right1: direction down-right AND u in 0..9 AND u-p>0.
+- DR_right2: direction down-right AND u in 10..18 AND 18-u-p>0.
+- DR_left1: direction down-right AND u in 0..9 AND u-p<0.
+- DR_left2: direction down-right AND u in 10..18 AND 18-u-p<0.
+But can a single h1 unit implement direction AND segment AND sign? We can use linear z = sign_expr + M*(dir_score-2) + M*(segment_indicator -1). Segment_indicator can be linear threshold? u in 0..9 is u<=9. u = x+9-y. Condition u<=9 => x-y <=0. This is linear. u in 10..18 => x-y >=1. We can add large penalties for wrong segment. For right1: z = (u-p) + M*(dir_score-2) + M*( (9 - u)?? )? Need positive only when u<=9. We can use penalty -M*(u-9) if u>9? But linear: add M*(9 - u) maybe. If u<=9, term >=0; if u>9, negative. But if u much >9, could still positive if M large? We want saturated negative. Use z = (u-p) + M*(dir_score-2) + M*(9 - u)?? For u<=9, z = u-p + M*dir + M*(9-u) = M*dir + M*9 - p, not sign of u-p. Not good. Need segment gate without altering sign. We can use large offset: z = (u-p) + M*(dir_score-2) + M*(segment_score -1), where segment_score is 1 if u<=9 else 0. But segment_score is not linear; can approximate with threshold? h1 is single linear threshold, cannot have product of segment and sign. But we can encode segment by adding a large constant that changes sign? For right1, we want z positive iff u<=9 and u>p. The set {u<=9, u>p} in (u,p) is a triangle. Is it linearly separable in (u,p)? Yes: u - p >0 and u <=9. Intersection of two halfspaces, not a single halfspace. A single linear threshold cannot implement both unless one condition redundant. But with direction penalty, still need two conditions. Could use two h1 units? One for u>p, one for u<=9, then h2 AND? h2 linear cannot AND unless h1 units are saturated and h2 uses sum with threshold. Yes! h2 can implement AND of h1 indicators: h2 = tanh(gain*(h1_a + h1_b -1.5)) if h1 in {0,1}. But our h1 tanh outputs -1/+1. We can design h1 indicators as +1 when condition true, -1 false. Then h2 AND: z = gain*(a+b -1) maybe: if both +1 => +1; else <= -1. Good. So we can use h1 for simple linear conditions, h2 for conjunctions and output.
+
+This may fit: h1 units for direction, segment, sign conditions. h2 units to combine into left/right.
+
+But we have only 32 h1. Need allocate for down and up directions, segments, signs. Let's design a digital policy using h1 linear threshold conditions and h2 gates.
+
+Inputs: ball channel (ch3), trail channel (ch4), paddle channel (ch0), bricks (ch2) maybe ignore. We can compute linear forms:
+- x = sum c * ball_c
+- y = sum r * ball_r
+- p = sum c * paddle_c
+- trail_x, trail_y.
+Direction scores:
+dx = x - trail_x ∈ {-1,0,1}
+dy = y - trail_y ∈ {-1,0,1}
+For normal states, dx,dy ±1. Down-right: dx=1,dy=1. We can use linear score s_dr = dx + dy. s_dr=2 for DR, 0 for DL/UR, -2 for UL. Down-left: dx=-1,dy=1 => s_dl = -dx + dy =2. Up-right: dx=1,dy=-1 => s_ur = dx - dy =2. Up-left: s_ul = -dx - dy =2.
+We can create h1 units that are +1 if direction condition (score=2) and maybe -1 otherwise: z = M*(score-2). With M large, tanh ~ +1 if score=2, -1 if score<=0. But if score=0, z=-2M -> -1. Good. Use gain maybe 1? Actually h1 = tanh(z). We can set W1 weights to compute z directly, no extra gain? The IR THRESHOLD multiplies weights by gain and bias -gain*threshold. We can use RAW to set exact z. But final code can use add_h1_threshold with input_weights and threshold/gain. It multiplies all weights by gain. We can define input_weights as coefficients, threshold 0, gain M. Then z = M*(sum w x). For direction: w such that sum = score-2? Need bias -2M. Could use RAW with bias. Easier in IR: add_h1_threshold with input_weights mapping for score, threshold=2, gain=M => z=M*(score-2). Good.
+
+But for conditions like u-p>0, we can use threshold: sum = u-p, threshold=0, gain=G => +1 if >0, -1 if <0. If equal, tanh(0)=0; we can set threshold=0.5 to make >0? Since integer, u-p>0 iff u-p >=1. Use threshold=0.5. For <0, use - (u-p) threshold 0.5.
+
+Segment conditions: u<=9 => 9-u >=0. Use threshold 0.5 for 9-u >0? If u<=8? Need include u=9. For integer, u<=9 iff 9-u >=0. To make +1 at 0, threshold negative? If z = G*(9-u - 0.5), then u=9 => -0.5G negative. Use threshold=-0.5: z=G*(9-u +0.5), u=9 =>0.5G positive, u=10=>-0.5G negative. So threshold = -0.5 for expression 9-u. Or use expression 10-u >0.5. We'll handle.
+
+But h1 units for conditions can be independent of direction. Then h2 can AND direction with segment and sign. However h2 can only combine h1 units linearly. If h1 indicators are +1 true, -1 false, AND of three: z = G*(a+b+c -3) maybe: all +1 =>0? Need positive. Use z = G*(a+b+c -2.5): all +1 =>0.5G positive; two +1 one -1 => -1.5G negative. Good. For OR of multiple right conditions, h2 can sum indicators: z = G*(sum - (k-0.5))? But if each condition h2? We can create h2 units for each conjunction, then output left/right as OR of conjunctions. Or directly output logits from h2 conjunction units.
+
+Need count h1 units. Conditions needed:
+Directions: DR, DL, UR, UL (4) maybe only down directions? For policy maybe use down and up. Let's include 4.
+For down-right: u = x + 9 - y. Need segment u<=9 (A), u>=10 (B). Sign right: u-p>0 (C), left: u-p<0 (D). For segment B, target=18-u, sign right: 18-u-p>0 (E), left: 18-u-p<0 (F). So 6 conditions for DR.
+Down-left: u = x -9 + y (range -9..9). Could shift v = u+18 = x + y +9? Range 9..27. target f(v) with period18. v in 9..27. Segments: v in 9..18? f: for v=9..18, f=v? Wait f(m) for m 0..18. v=9..18: f=v for 9, then 18-v for 10..18. v=19..27: m=v-18=1..9, f=m=v-18. So three segments? Alternatively use u negative. Maybe easier use no-reflection? But walls matter. For down-left, u = x -9 + y. If u in 0..9, target=u. If u in -9..-1, target = -u? Because reflect negative: f(-1)=1, f(-9)=9. So target = |u| for u in -9..9? Since range -9..9, yes target = abs(u). Because starting x moving left, if hits left wall, reflects. For u negative, target = -u. So sign target-p: if u>=0: u-p; if u<0: -u-p. Conditions: u>=0 (A), u<0 (B). Right: u-p>0 (C), -u-p>0 (D). Left: u-p<0 (E), -u-p<0 (F). 6 conditions.
+Up directions: If ball moving up, time to bottom without bricks t = y+9? But bricks. Maybe use similar with u = x + (y+9)*dx. Range for UR: x+y+9 = 9..27. For UL: x - (y+9) = -18..9? Actually x 0..9, y0..9 => -18..9. Need reflection over period 18. Could compute target after top bounce. But bricks may alter. Maybe we can use a simpler policy for up: move toward current ball x? Or use predicted no-brick target. Let's see unit budget.
+
+If we implement exact down directions (12 conditions +4 dir =16 h1). Up directions maybe 12 more =>28, plus maybe ball_y? total 28. h2 32. Could fit. But up target with bricks not exact. Maybe use no-brick top bounce. Need conditions for up-right: v = x + y + 9 (9..27). f(v) period18. Segments: v in 9..18: f = v if v<=9? only v=9; for 10..18 f=18-v. v in 19..27: m=v-18 (1..9), f=m. So three segments: S1 v=9 (target9), S2 10..18 target=18-v, S3 19..27 target=v-18. But v=9 rare (x=0,y=0). Could ignore or include. For sign, linear expressions: S2: 18-v-p = 9 - x - y - p? since v=x+y+9 => 18-v-p=9-x-y-p. S3: v-18-p = x+y-9-p. S1: 9-p. Need conditions v<=18, v>=19, etc. Could use 6 conditions similar. Up-left: u = x - y -9 (range -18..9). target = reflect(u). Could shift v = u+18 = x - y +9 (range 0..18). Nice! For up-left, v = x - y +9 (0..18). target f(v). Segments v<=9 target=v, v>=10 target=18-v. 6 conditions. Up-right v = x + y +9 (9..27) spans two periods; can use w = v-18 = x+y-9 (range -9..9), target=abs(w)? Since period 18, f(v)=f(w) where w in -9..9. Yes target = abs(x+y-9). So similar to down-left: w = x+y-9. If w>=0 target=w, else -w. 6 conditions.
+
+Thus for each direction, we can compute a "phase" variable in [-9,9] or [0,18] and target=abs or triangular. Conditions can be unified.
+
+Maybe we can create h1 conditions for each direction's target sign without segment by using absolute value? target = |u| for u in [-9,9]. Sign target-p: if u>=0: u-p; if u<0: -u-p. Need two segments. For variables in [0,18], target = min(u,18-u). Sign: if u<=9: u-p; else 18-u-p. Two segments.
+
+So 6 h1 per direction: segment positive/negative, sign right/left for each segment. Plus direction indicator. 7*4=28 h1. Leaves 4 h1. Good.
+
+But h1 conditions like "u>=0" are linear in ball_x, ball_y. We can implement. Direction indicators also linear in ball/trail. However h1 condition units do not include direction; h2 will AND with direction. But sign conditions like u-p>0 may be true for other directions; h2 AND with direction ensures only relevant.
+
+h2 units: For each direction, we need OR of two right conjunctions and two left conjunctions. We can create h2 units:
+- DR_right = AND(DR_dir, DR_seg1, DR_right1) OR AND(DR_dir, DR_seg2, DR_right2). OR of two ANDs. h2 can implement OR by summing two h2 AND units? But h2 units are linear in h1, cannot take h2 as input. We can directly implement OR of conjunctions as a single linear threshold over h1? OR of (A&B&C) and (A&B&D) = A & B & (C or D). Since C or D is u-p>0 or 18-u-p>0, which may be equivalent to target>p. Could maybe combine into one condition? For a given direction and segment, right condition. OR across segments: target>p. Is target>p linearly separable with direction? Maybe not, but we can implement in h2 using h1 indicators? h2 linear cannot OR of products unless we have h1 units for each conjunction. But we can create h1 units for each full conjunction? h1 single linear threshold cannot implement 3-way AND as discussed? Maybe some are linearly separable? Let's check. Full conjunction: direction DR (score=2), segment u<=9, sign u-p>0. This is intersection of three halfspaces. Not generally a single halfspace. But maybe with one-hot inputs and small ranges, could be linearly separable? Not guaranteed. Better use h2 to AND h1 indicators. But h2 can only produce one unit per conjunction. Then output can OR conjunction units? Output logits are linear in h2, can OR by summing h2 indicators with threshold? Output is linear no activation, but softmax. We can set logit for right = sum of h2_right_conj units + bias. If each h2 unit is +1 when conjunction true, -1 otherwise, sum can be positive if any true. But if two false (-1 each) and one true (+1), sum=-1; with bias +1.5 maybe positive. We can use output bias. Or create h2 OR unit? h2 cannot take h2 inputs. But output can combine h2 units linearly. So we can have h2 units for each conjunction (4 per direction? 2 right,2 left) =16 h2. Then output right logit = sum of right conjunction h2 units + bias to make positive if any. Left similarly. No-op maybe when no direction? But one direction always. Need handle equality target=p: no move? Could output no-op. If target=p, both right/left false. We can set no-op high. But if sticky, maybe okay.
+
+Count h2: 4 directions *4 conjunctions =16. Plus maybe up/down? 16. Leaves 16. Good.
+
+But h2 AND of three h1 indicators: h1 indicators are tanh outputs near +1/-1. h2 pre = G*(a+b+c -2.5). If all +1 =>0.5G; if two +1 one -1 => -1.5G; if one +1 two -1 => -3.5G. With G=10, saturated. Good. Need ensure h1 indicators are reliably +1/-1. Use high gain in h1 (e.g., 10 or 20). But h1 conditions with linear forms may have zero at boundaries; choose thresholds to avoid zero. For integer variables, use margins 0.5.
+
+Now, can h1 direction indicators be +1/-1? Use score-2. For normal direction, score=2 => z=0 if threshold? Wait if we set z = M*(score-2), for desired direction score=2 =>0, not +1. Need add margin: z = M*(score - 1.5). Desired score=2 =>0.5M positive; other score=0 => -1.5M negative; score=-2 => -3.5M. So threshold=1.5 for score. Good.
+
+Segment conditions: For u in [0,9] vs [10,18]. Use expression 9.5 - u? If u<=9 => >=0.5 positive; u>=10 => <=-0.5 negative. So h1 = tanh(G*(9.5 - u)). For u>=10 condition: tanh(G*(u - 9.5)). For u>=0 vs u<0: use 0.5 - u? If u>=0 => >=0.5? u=0 =>0.5 positive; u=-1=>1.5 positive? Wait 0.5 - (-1)=1.5 positive, wrong. Need expression u +0.5: u>=0 => >=0.5 positive; u<=-1 => <=-0.5 negative. So h1 = tanh(G*(u +0.5)). For u<0: tanh(G*(-u +0.5))? u=-1 =>1.5 positive; u=0=>0.5 positive wrong. Use -u -0.5: u=-1=>0.5 positive; u=0=>-0.5 negative. Good.
+
+Sign conditions: u-p>0: u-p >=1. Use u-p -0.5 >0. h1 = tanh(G*(u-p-0.5)). u-p<0: -u+p-0.5. For 18-u-p>0: 18-u-p-0.5 =17.5-u-p. <0: u+p-17.5.
+
+Need define u expressions per direction:
+DR: u = x + 9 - y. (range 0..18)
+DL: u = x - 9 + y. (range -9..9)
+UR: w = x + y - 9. (range -9..9) because target=abs(w) after top bounce? Let's verify up-right no-brick: t = y+9? u = x + t*dx = x + y +9. Mod 18, w = u-18 = x+y-9. target=f(w) with w in -9..9 => abs(w). Yes.
+UL: v = x - y + 9. (range 0..18) because u = x - (y+9) = x-y-9; add 18 => x-y+9. target=f(v). Good.
+
+But for up directions, t formula may be y+9 except y=0 issue. If y=0 moving up, actual next step stays y=0 then down, total t=10 not 9. Our formula t=9 gives one step less. Rare. Could adjust? Maybe use t = y+10 if y=0? But condition y=0 adds complexity. Ignore.
+
+Bricks: For up-moving ball, it will likely hit bricks before top, so no-brick target may be wrong. But maybe using no-brick target still positions paddle for eventual bottom? Let's test. Ball moving up from y=4, x=5, dx=+1, bricks present row3. It will hit brick at row3? If brick at x=6? It bounces at y=4, then down. Actual target bottom = x + 5*dx =10 -> reflect 8? No-brick top target: w=x+y-9=0, target0. Very different. So up policy may be bad. Maybe when ball moving up, we should not aim for top bounce; instead aim for brick bounce? Since bricks rows 1-3, if ball moving up and below bricks (y>=4), it will hit a brick at row3 if present in its path, bounce at y=4 (last_y). The x at bounce = x + (y-4)*dx? From y to 4: steps = y-4. Then down to bottom: 5 steps. Total x change = (y-4)*dx + 5*dx = (y+1)*dx. Target = reflect(x + (y+1)*dx) if brick present at hit x. If brick missing, may go higher. But initially all bricks present. As bricks break, path may clear. A robust policy could assume ball will bounce at row4 if moving up and y>=4, because bricks likely present? But if brick at hit column broken, it may continue. However score high when many bricks broken; maybe need adapt.
+
+Maybe use a simpler up policy: move toward ball's current x or toward center, because when ball bounces off bricks, it will come down near its current x plus small lead. Let's analyze. If ball moving up from y=4, it bounces at y=4 after 0 steps? Actually if at y=4 moving up, next step new_y=3 brick, bounces back to y=4, so immediately. Then down 5 steps. Target = x + 5*dx (reflected). If at y=5 moving up, step to y=4 (no brick? row4 empty), next step to y=3 brick, bounces to y=4. Total x change to bottom: 1 (to y4) +1 (to brick) +5 =7? Formula y+1=6? Wait y=5: steps to bounce: from y=5 to y=4 (1), then to y=3 brick (1) and bounce to y=4, so at bounce y=4 after 2 steps. Then down 5 steps. Total x change 7. y+2? y=5 =>7. General if brick at row3, bounce at y=4 after (y-4)+1 = y-3 steps? For y=4: 1 step (to brick and bounce) yes y-3=1. For y=5:2. Then down 5. Total = y+2. For y=4 total 6? But earlier I said 5; let's simulate y=4, x=5, dx=+1, brick at (3,6). Step1: new_y=3 brick, last_y=4, new_y=4, x=6, dir down. Then steps to bottom: y=4 to9 =5 steps, x changes 5 => final x=11 reflect? Total x change 6. So formula y+2=6. Good. If y=3? Ball in brick row? It can't be in brick? Ball can be at y=3 if brick broken? If moving up from y=3, next y=2 brick maybe bounce at y=3, total? y+2=5. If no brick, top bounce total y+9.
+
+So if bricks present, up target t = y+2 (for y>=4) maybe. If y=4..9. If y<4 (inside brick area) maybe t = y+? But ball can be at y=1-3 if brick broken or after bounce? It can be in rows 1-3 if brick absent. Hard.
+
+Maybe policy: if ball moving up and y>=4, assume brick bounce at row4: target = reflect(x + (y+2)*dx). If y<4, assume top bounce? This may be better. But bricks can be broken, so if path clear, ball goes top. Could use brick channel to detect if brick ahead? Maybe too complex.
+
+Given handcraft, maybe a simple policy that catches and breaks some bricks is enough. But we want as well as possible. Let's think of known MinAtar Breakout optimal? The ball speed and paddle speed equal; to maximize score, need keep ball alive and break bricks. A deterministic policy could be: move paddle to the ball's x when ball is moving down; when ball moving up, move to the x where ball will hit the paddle after bouncing off bricks/walls. Maybe RL networks learn this.
+
+Could we implement a more exact policy using current bricks? The network has brick inputs. We could use them to decide if ball will hit a brick. But 32 units limited. Maybe ignore bricks; assume full bricks for up bounces. As bricks break, policy may mispredict but still maybe catch? If ball goes through broken brick to top, our target too close, paddle may be too far left/right. But maybe ball will still be catchable if paddle moves toward current x? Need evaluate.
+
+Alternative: Use a "safe" policy: always move toward the ball's current x when ball moving up, and toward predicted bottom when moving down. This avoids large misprediction. When ball moving up, it will bounce off bricks soon and come down near current x plus a few steps; moving toward current x may be okay. But if ball moving up and dx away, it will move horizontally before bounce; need lead. Could use t=y+2 (brick bounce) as above. That's a lead. If bricks broken, lead too small? Actually if no brick, t larger, target further. Moving with smaller lead may be behind. But maybe still catch if paddle can adjust after bounce? When ball bounces down, direction dy flips, our policy switches to down prediction, giving time to correct. If ball bounces at row4, it has 5 steps to bottom; paddle can move up to 5. If our up policy was off by a few, maybe correct. If ball goes to top, it has 12 steps, more time. So using brick-bounce lead may be safe.
+
+Maybe use up target t = y+2 for y>=4, and for y<4 use t = y+9? But if y<4 and bricks present, ball may bounce at row3/2/1. Could use t = y+2? For y=3, if brick above at row2, bounce at y=3 after 1 step? total down 6? y+3? Let's not.
+
+Simplify: For up-moving ball, use t = y + 2 (assuming bounce at row4) for all y? If y=0, t=2, target near current, but ball actually top bounce. But y<4 rare and ball in brick area; maybe after brick broken. Could use t = max(y+2, 9-y?) no.
+
+Maybe use a hybrid: if ball moving up, move toward ball's x (t=0) or small lead dx? Let's test catchability. Suppose ball at y=4, x=0, dx=+1, paddle p=4. Brick bounce target t=6 => target=6. If we move toward current x (0), paddle goes left to 0, then when ball bounces down at x=6, paddle at 0, 5 steps to move right to5? target6, miss by1. If use t=6, paddle moves right to6, catch. So lead important.
+
+If bricks broken and ball goes top, target t=13 => x=13 reflect5. Our t=6 target6, paddle at6; after top bounce ball at bottom x5, paddle can move left1 in 12 steps, catch. So not fatal. If target difference > time after bounce? Paddle can adjust. So t=y+2 may be okay.
+
+What about down-moving ball after brick bounce: our down prediction exact (no bricks below). Good.
+
+Thus policy:
+- Determine direction from ball/trail.
+- If dy=down: t = 9 - y.
+- If dy=up: t = y + 2 (assuming brick bounce) maybe capped? For y=9? ball at bottom? not. For y=0, t=2.
+- target = reflect(x + t*dx).
+- Move left if target < p, right if target > p, no-op if equal.
+
+This is a simple predictive policy. Need implement target sign with t depending on dy. We can create h1 conditions for four directions with t formulas:
+DR (dx=+1,dy=down): u = x + (9-y) = x +9 - y (0..18)
+DL (dx=-1,dy=down): u = x - (9-y) = x -9 + y (-9..9)
+UR (dx=+1,dy=up): u = x + (y+2) = x + y +2 (-? range 2..20). Need reflect. Could shift to [-9,9]? u range 2..20. Period18. Let w = u - 18 if u>18? Or use v = x+y+2. Range 2..20. target f(v mod18). Could use w = x+y-16? Since subtract 18: range -16..2. Not symmetric. Maybe choose t = y+2, u range 2..20. We can handle with segments: v in 0..18 and 18..20. Or use w = x+y-9? That was for t=y+9. For t=y+2, w = x+y+2. Could use target = f(w). w range 2..20. Segments: 2..9 target=w; 10..18 target=18-w; 19..20 target=w-18 (1,2). Three segments. More conditions. Maybe choose t = y+3? range 3..21. Not better. Could choose t = y+1? range1..19. Still three. If choose t = y+? to make range within [-9,9] or [0,18]? For up, t = y + c. u = x + y + c. Range c..18+c. To fit [0,18], need c=0. t=y (range0..18). That corresponds to bounce at row? t=y means from y to bottom after top? Actually if ball moving up and bounces at current y? Not physical. But for policy, t=y might be okay? If y=4, t=4, target x+4, less lead than brick bounce 6. Maybe still okay. t=y gives u range 0..18, easy two segments. For y=0, t=0. Could use t = y (i.e., move toward x + y*dx). This is like assuming ball will bounce at top? No, top bounce t=y+9. But t=y is smaller. Maybe safe? Let's test y=4,x=0,dx=+1,p=4: target4, paddle stays, ball brick bounce target6, after bounce 5 steps, paddle can move right to4? miss by2. Not good. t=y+2 better.
+
+Could implement three segments for up-right with 8 h1? Let's count. For each direction, if variable range spans 3 segments, need segment conditions and sign conditions: 3 segments *2 signs +3 segment indicators =9 h1 per direction. 4*9+4 dir=40 >32. Need reduce.
+
+Maybe use no-brick top t=y+9 gave variable w in [-9,9] for UR and v in [0,18] for UL, easy 6 each. Brick-bounce t=y+2 gives UR range 2..20 (3 segments), UL u=x-y-2 range -11..7 (3? maybe). More complex.
+
+Could use t = y+9 for up (top bounce) despite bricks. It is easy and gives large lead. If bricks bounce earlier, paddle may be too far, but ball has time after bounce? Let's test worst: y=4,x=0,dx=+1,p=4. Top target w=x+y-9=-5 => target5. Paddle moves right to5. Actual brick bounce target x+6=6. Paddle at5, ball bounces at x=6,y=4, then down 5 steps to x=11 reflect7? Wait target from bounce: x at bounce after 1 step =1? Let's simulate: start y4 x0 dx+1. Step1 to brick? new x1,y3 brick, bounce y4,x1,dir down. Then 5 steps: x6 at bottom? x1+5=6. Top target was5. Paddle at5, ball bottom x6, miss by1. If paddle at5, could move right one step after bounce? It has 5 steps, but our policy when ball moving down will predict target6 and move right, catch. At bounce observation y4,x1,dy down, target = x+5=6, paddle p5, move right. Good. So top lead not fatal.
+
+If top target far opposite? y=4,x=9,dx=-1,p=4. Top w=x+y-9=4 target4, paddle stays. Actual bounce target x-6=3, paddle can adjust. Good.
+
+Maybe top-bounce up policy is okay because after brick bounce, down policy corrects. It may cause paddle to be positioned for a later bottom, but ball bounces earlier; still enough time? The earlier bounce gives 5 steps to bottom; if top target differs by up to? Top t=13, brick t=6, difference 7 in x. Paddle may be 7 away from actual target at bounce, but has 5 steps, could miss if >5. Example y=4,x=0,dx=+1 top target5, actual6 diff1. Max diff? top target = reflect(x+13), actual=reflect(x+6). Difference can be up to? x=0: top5, actual6 diff1. x=1: top6, actual7 diff1. x=2: top7, actual8 diff1. x=3: top8, actual9 diff1. x=4: top9, actual0 (reflect10) diff9! Start y4,x4,dx+1,p? Top target9, actual target0. Paddle moves to9, ball bounces at x5? actual bottom0, 5 steps from p9 to0 impossible. But will ball hit brick? x4 dx+1: step1 x5,y3 brick, bounce x5, down 5 => x10 reflect8? Wait actual target from bounce: x at bounce 5, +5=10 reflect8, not 0. My formula x+6=10 reflect8. Top target x+13=17 reflect? f(17)=1? Wait period18: f(17)=1, not9. Let's recalc top w=x+y-9 =4+4-9=-1 target1. Actual u=x+6=10 target8. Diff7. Paddle at1, actual8, 5 steps miss. But down policy after bounce: at bounce y4,x5,dy down, target x+5=10 reflect8, paddle p1, needs 7 steps, only5, miss. So top-bounce up policy can fail badly. Brick-bounce t=y+2 would target8, catch. So need better up lead.
+
+Maybe use t = y+2 for up. Need implement. Could reduce complexity by using a different representation for up target sign that avoids 3 segments? For t=y+2, UR u=x+y+2 range 2..20. target f(u). We need sign target-p. Could compute using two variables? Since range only exceeds 18 by 2. Most of range 2..18 two segments, plus 19,20 small. We can ignore the 19,20 segment? If u=19,20 (x+y=17,18), target=1,2. This occurs when x,y high. Maybe rare. If ignore, treat u=19,20 as segment 10..18? target=18-u negative? Not valid. Could clamp u to 18? If u>18, target small; sign likely left unless p=0. Could handle with a condition. Maybe 3 segments but can share sign conditions.
+
+For UR with u=x+y+2. Segments:
+S1: u<=9 (x+y<=7): target=u.
+S2: 10<=u<=18 (8<=x+y<=16): target=18-u.
+S3: u>=19 (x+y>=17): target=u-18.
+Sign right for S1: u-p>0.
+S2: 18-u-p>0.
+S3: u-18-p>0.
+Left similarly.
+Segment indicators: S1: 9.5-u >0; S2: (u-9.5)*(18.5-u)? product not linear. But S2 can be AND of u>=10 and u<=18 in h2. We can have h1 indicators: u>=10 (u-9.5>0), u<=18 (18.5-u>0). S3: u>=19 (u-18.5>0). S1: u<=9 (9.5-u>0). That's 3 segment h1 (u<=9, u>=10, u>=19) but S2 = u>=10 AND u<=18; need u<=18 too. Could use u>=10 and not u>=19? h2 can AND with negated h1? h1 for u>=19 is +1 true; we need false. We can use -h1 in h2: AND(u>=10, NOT u>=19) => z = G*(a - b -1.5)? If a=+1,b=-1 => +1? Let's design later. So segment h1: u<=9, u>=10, u>=19 (3). Sign h1: S1 right/left (2), S2 right/left (2), S3 right/left (2) =7. Plus direction =8 per UR. UL with t=y+2: u=x-y-2 range -11..7. Could shift v=u+18 = x-y+16 range 5..23. Also 3 segments. Maybe use w = x-y+? To fit [-9,9]? Choose t = y+? such that u range within [-9,9] for both dx? For up, u = x + (y+c)*dx. For dx=+1 range c..18+c. To fit [0,18], c=0. For dx=-1 range -18-c..-c. To fit [-9,9], c=9? Not both. So up inherently spans more.
+
+Maybe use a different up strategy: instead of predicting target, move in direction of dx with a fixed lead? For up, ball will bounce off bricks soon; maybe just move in dx direction (right if dx=+1, left if dx=-1) until near wall? This is simple: if ball moving up-right, move right; up-left, move left. This matches horizontal velocity, keeping relative x constant. If ball bounces off brick, dx unchanged, so relative x constant; if paddle was aligned at bounce, catch. But if not aligned, never aligns. Could combine: if target (brick-bounce) > p move right, else left. Need compute.
+
+Maybe we can implement brick-bounce up target with a simpler formula: target = reflect(x + (y+2)*dx). Since y+2 <=11. For dx=+1, u=x+y+2 (2..20). For dx=-1, u=x-y-2 (-11..7). We can compute sign target-p using "unreflected" u and maybe wall conditions. Could create h1 units for each possible target? Another approach: use 10 h1 units for target one-hot for up? Hmm.
+
+Given 32 h1, maybe we can allocate a lookup for up target using h1 conjunctions? Let's step back.
+
+Maybe we don't need perfect up prediction. A policy that uses down prediction exact and up prediction approximate may still score well. The critical misses occur when ball moving up and paddle mispositions. But after brick bounce, ball moving down; if paddle is too far, may miss. Need up prediction reasonably close. Brick-bounce t=y+2 is good while bricks present. When bricks broken, top bounce may be better. Could use a compromise t = y+5? Range 5..23, still 3 segments. t=y+4? range4..22. t=y+3? 3..21. t=y+2 best for full bricks. Maybe use t=y+2 and accept 3 segments.
+
+Can we implement 3-segment target sign with fewer h1 by using h1 units that directly compute full conjunctions via linear separability? Let's investigate if full conjunctions are linearly separable in one-hot input space. For a fixed direction and segment and sign, the set of ball positions (x,y) satisfying linear inequalities. In 2D grid, intersection of halfplanes is a convex polygon (in continuous x,y). A single linear threshold in (x,y,p) can represent a halfspace, not intersection. But because p is one-hot and we include -p, the set in (x,y,p) may be non-convex. However with one-hot p, maybe each p slice is a polygon; a linear function in x,y,p can represent different thresholds per p? Since p is a coordinate (0..9) if we use analog p, linear function a*x + b*y + c*p + d. For each p, it's a halfspace in x,y. Intersection of two halfspaces cannot be represented by one halfspace unless one redundant. So not exact. But we can use high gain and maybe approximate? Risk.
+
+Use h2 ANDs. Need h1 indicators for each linear condition. For 3 segments, conditions:
+Direction (1)
+Segment boundaries: u<=9, u>=10, u>=19 (3) [u<=18 can be NOT u>=19]
+Sign expressions: e1=u-p, e2=18-u-p, e3=u-18-p. Need right/left for each: 6.
+Total 10 per direction. 4 directions =40 + dir? direction included in 10? 10 includes dir? Actually per direction: dir 1 + seg 3 + sign 6 =10. 4*10=40 >32.
+
+Can share sign expressions across directions? e.g., u-p>0 for DR and UR maybe different u. Not share.
+
+Can reduce by not implementing up-left/up-right exact; use simpler up policy. For up, maybe just move toward ball's x (no prediction) or move in dx direction. That requires few units. Down exact requires 14? Let's count down exact with 2 segments:
+Per down direction: dir1 + seg2 + sign4 =7. Two down =14. Up simple: maybe 2 direction indicators + 2 move indicators? We can use h1 for up-right/up-left and output move in dx direction. But need compare? If just move in dx direction, no paddle comparison. Could output right when up-right, left when up-left. That may be okay? It will keep relative x constant. If paddle not aligned, may miss, but down prediction after bounce? If ball moving up, paddle moves with ball dx, so relative x constant. At brick bounce, relative x same as before. If initially not aligned, miss. But maybe paddle was aligned from previous down catch? After a catch, ball moving up with dx flipped or same; paddle at catch x. Relative x maybe 0 or 1. It may stay aligned. Let's simulate: catch at target p, ball at bottom new_x=p, old x=p±1, dx flips. After bounce, ball y=8? Actually new_y=last_y=8? Code sets new_y=last_y (8) and dir up. So ball at y=8, x=p, dx flipped? If new_x==pos, dx flips. So ball x equals paddle, relative 0. Moving up, if paddle moves in dx direction, ball x changes dx, paddle changes dx, relative 0. It will hit brick at x=p+dx*(y-3?) and bounce, relative 0, catch. So moving in dx direction when up maintains alignment if started aligned. Good! If not aligned due to initial state or misprediction, it won't correct. But initial ball moving down, down prediction aligns. After catch, aligned. So up policy can simply follow dx (move right if ball moving right, left if ball moving left) to maintain alignment. This is much simpler and may be optimal for brick bounces. What about wall reflections? If ball hits wall while moving up, dx flips. Our up policy will flip next step, maintaining relative? If ball at x=0 moving up-left, dx=-1, paddle moves left. Ball next x=0 (wall reflect dx to +1), paddle maybe x-1. Relative changes? Suppose ball x=0, paddle x=0, dx=-1. Step: ball new_x=-1->0, dx=+1; paddle moves left to 9? If action left from 0 stays0? Actually paddle max(0,pos-1), so stays0. Relative 0. Good. If paddle x=1, ball x=0, dx=-1, paddle moves left to0, ball stays0, relative0. Good. If ball hits right wall, similar. So following dx works with walls.
+
+What about top bounce if no bricks? Ball moving up, following dx maintains relative x until top, then dy flips, dx unchanged. At top, relative x still 0, then down prediction will catch. So following dx when up is actually good if relative x is 0. If relative x not 0, it remains not 0. But down prediction can correct when ball moving down. After a catch, relative x is 0 (if catch via new_x==pos) or maybe 0? If catch via old ball_x==pos, ball x=p, dx unchanged, relative0. So yes. Initial state ball moving down, down prediction should align. If down prediction fails due to sticky or sampling, relative may not be 0, but can recover when ball moving down.
+
+Thus policy:
+- If ball moving down: move toward predicted bottom target (exact with wall reflection).
+- If ball moving up: move in the same horizontal direction as ball (right if dx=+1, left if dx=-1). If at wall? If dx=+1 and paddle at 9, right no-op; okay. If dx=-1 and paddle at0, left no-op.
+This is simple and likely robust. It doesn't need up target prediction. It may not break bricks optimally? It maintains alignment, so ball will hit bricks at same x as paddle? Actually if relative0, ball x = paddle x at all times while up. It will hit brick at column p+dx*(steps). Paddle follows, so at bounce ball x = paddle x? Let's simulate: ball y=8,x=4,dx=+1,p=4. Step1 ball x5,y7,p5. Step2 x6,y6,p6. Step3 x7,y5,p7. Step4 x8,y4,p8. Step5 new x9,y3 brick? If brick at (3,9), bounce to y4,x9, dir down, paddle action right from8 to9. Relative0. Catch later. Good. It will break brick at column9. If no brick, continues to wall/top, paddle follows. Good.
+
+This policy may be near optimal for keeping ball alive. It may not aim ball to break specific bricks, but any brick broken gives score. It will break bricks along the diagonal path. When ball bounces off brick, dx unchanged, dy flips; down prediction will catch. After catch, dx flips (if side hit) or unchanged (if center). If dx flips, up following will go opposite, maybe break other bricks. It may create a pattern.
+
+Need handle initial state: ball at (3,0) dx=+1,dy=down, p=4. Down target: u=x+9-y=0+6=6, target6. Paddle should move right. It will take 6 steps to bottom, paddle from4 to6 (2 steps) then wait. Catch at x6? Simulate: ball y3 x0, p4. Step1 ball x1 y4, p5; step2 x2 y5,p6; step3 x3 y6,p6 (noop); step4 x4 y7; step5 x5 y8; step6 x6 y9 catch. Good. Outgoing dx? old ball_x=5? At step6 old x5, new x6=p, dx flips to left. Ball up-left, paddle follows left. It will break bricks maybe at column? Good.
+
+If ball starts (3,9) dx=-1, target u=x-9+y=9-6=3, target3. Paddle moves left to3. Catch, dx flips right. Good.
+
+So down prediction exact is key. Up follow dx is simple.
+
+Now implement down prediction exact with wall reflection. Need h1/h2 units.
+
+Policy outputs:
+- If dy=down:
+  - if dx=+1 (DR): target = f(u), u=x+9-y (0..18). Move right if target > p, left if target < p, no-op if equal.
+  - if dx=-1 (DL): target = f(u), u=x-9+y (-9..9) => target=abs(u). Move right if target > p, left if target < p.
+- If dy=up:
+  - if dx=+1: move right (unless maybe target? just right)
+  - if dx=-1: move left
+- If direction ambiguous (trail same): maybe no-op or follow? Could use down? We'll handle by default no-op or center.
+
+Need implement with 32 h1, 32 h2.
+
+Let's design h1 indicators (saturated +1 true, -1 false) for down directions.
+
+We can use h1 units:
+0: DR_dir: +1 if dx=+1,dy=+1.
+1: DL_dir: +1 if dx=-1,dy=+1.
+2: UR_dir: +1 if dx=+1,dy=-1.
+3: UL_dir: +1 if dx=-1,dy=-1.
+Maybe also Down_dir = DR or DL? Could use h2 OR. But for down conditions, we AND with specific dir.
+
+DR conditions:
+u = x + 9 - y.
+Segment S1: u <= 9. Indicator A = +1 if u <=9.
+Segment S2: u >=10. Indicator B = +1 if u >=10. (Since u range 0..18, B = not A except boundary? u integer, A true 0..9, B true10..18.)
+Sign S1 right: C = +1 if u - p > 0.
+Sign S1 left: D = +1 if p - u > 0.
+Sign S2 right: E = +1 if 18 - u - p > 0.
+Sign S2 left: F = +1 if u + p - 18 > 0.
+Then DR_right = (DR_dir & A & C) OR (DR_dir & B & E).
+DR_left = (DR_dir & A & D) OR (DR_dir & B & F).
+We can create h2 units for each conjunction:
+4: DR_r1 = AND(DR_dir, A, C)
+5: DR_r2 = AND(DR_dir, B, E)
+6: DR_l1 = AND(DR_dir, A, D)
+7: DR_l2 = AND(DR_dir, B, F)
+Then output right logit includes DR_r1 + DR_r2, left includes DR_l1+DR_l2.
+
+DL conditions:
+u = x - 9 + y (range -9..9). target=abs(u).
+Segment S1: u >=0. Indicator G = +1 if u >=0.
+Segment S2: u <0. Indicator H = +1 if u <0.
+Sign S1 right: I = +1 if u - p >0.
+Sign S1 left: J = +1 if p - u >0.
+Sign S2 right: K = +1 if -u - p >0.
+Sign S2 left: L = +1 if u + p >0? Since target=-u, left if -u < p => u + p >0. For integer, -u - p <0 => u + p >0. Use u+p -0.5 >0.
+Then DL_right = (DL_dir & G & I) OR (DL_dir & H & K)
+DL_left = (DL_dir & G & J) OR (DL_dir & H & L)
+h2 units 8-11.
+
+Up follow:
+UR_dir (2) => right.
+UL_dir (3) => left.
+We can directly add to output logits: right += UR_dir, left += UL_dir. But h1 dir units are +1/-1. If UR_dir true +1, false -1. Output logit with bias can make positive when true. We'll handle.
+
+Total h1: 4 dir + DR 6 + DL 6 =16. Leaves 16. Good.
+
+Need ensure h1 indicators are +1 true, -1 false. Use tanh with gain G=10 or 20. For conditions with integer margins, pre-activation at least 0.5*G for true, -0.5*G for false. G=10 gives tanh(5)=0.9999, good. For direction score margin 0.5, G=10. Use G=10.
+
+Now h2 conjunction units: 8 units. Each AND of three h1 indicators. h1 indicators in {+1,-1}. We want h2 +1 if all true, -1 otherwise. Use pre = G2 * (a + b + c - 2.5). If all +1: 0.5G2. If two true one false: -1.5G2. If one true: -3.5G2. If zero: -5.5G2. G2=10 => tanh(5)=1, tanh(-15)=-1. Good. But if h1 not exactly ±1 (tanh(5)=0.9999), fine.
+
+Output logits: We have h2 units for down right/left conjunctions (8). h1 dir units for up (2). Need produce 6 logits. We can set:
+logit_right = W3[DR_r1,3] + W3[DR_r2,3] + W3[DL_r1,3] + W3[DL_r2,3] + W3[UR_dir,3] + bias_right.
+logit_left = similarly + UL_dir + bias_left.
+logit_noop = maybe high when no down condition and no up? But one of up/down should be true. For equality target=p, down right/left false, up false (if down), so all right/left negative. We want no-op. Set no-op bias high enough. But if up dir true, right/left should dominate. Need choose biases.
+
+h2 conjunction units are +1 if true, -1 if false. For a down state, exactly one of right/left conjunctions may be true if target != p; if target=p, none true. For DR, if target>p, one of DR_r1/r2 true; if target<p, one left true; if equal, none. The false units are -1. Sum of two right units: if one true +1, other -1 =>0; if none true => -2. Left sum similarly. Up dir units: UR_dir +1 if up-right else -1; UL_dir +1 if up-left else -1. In down state, both up dirs false => -1 each. If we add them to right/left, they contribute -1. Need bias to make true positive.
+
+Let's define output contributions:
+Right logit = sum_down_right_h2 + UR_dir + bR.
+Left logit = sum_down_left_h2 + UL_dir + bL.
+Noop logit = bN (maybe 0) plus maybe no h2.
+For down state:
+- If right true: sum_down_right = 0 (one +1 one -1) or could be +2 if both? Can both right conjunctions true? Segments mutually exclusive, so no. sum=0. UR_dir=-1. logitR = bR -1.
+- If right false: sum=-2. logitR = bR -3.
+- Left similarly.
+We want if right true, logitR > logitL and > bN. If right false and left true, logitL >. If none (target=p), both false: logitR=bR-3, logitL=bL-3, no-op should win.
+Set bR=bL=3. Then true: 2, false:0. No-op bias maybe 1. Then true wins (2>1), false no-op wins (1>0). Good. But if both false due to direction ambiguous, no-op.
+For up state:
+- UR_dir=+1, UL_dir=-1. Down h2 sums: all down conjunctions false? Direction false, so each h2 AND false => -1. Sum down right = -2, down left=-2. logitR = -2 +1 +3 =2. logitL = -2 -1 +3 =0. Noop=1. Right wins. Good.
+- UL: left wins 2.
+What if direction ambiguous (trail same): dir units all false (-1). Down h2 false sums -2. logitR= -2 -1 +3=0, left=0, noop=1. No-op. Good.
+
+But h2 AND units when direction false: a=dir=-1, b,c maybe ±1. Sum a+b+c could be +1 if b=c=+1, then pre = G2*(1-2.5)=-1.5G2 => -1. Good. If b,c false, more negative. So false -1.
+
+Need ensure h1 dir units for up/down are mutually exclusive. Direction score using dx+dy etc. For normal states, one +1, others -1. For ambiguous dx=0,dy=0, all scores? DR score=0 => -1, etc. Good.
+
+Now need implement h1 linear conditions using IR. We need map input indices. Input index = (row*10+col)*6 + channel. Channels: 0 player/paddle, 1 danger empty, 2 reward/bricks, 3 projectile/ball, 4 trail, 5 gauge empty.
+We need weights for ball_x, ball_y, trail_x, trail_y, paddle_x.
+For a linear form like x + 9 - y, we can set input_weights:
+- ball channel col c weight +c for x.
+- ball channel row r weight -r for y (since index row*10+col, channel 3). For y, weight -r for each cell in row r (all cols). But ball is one-hot, so sum -y.
+- bias? The IR THRESHOLD multiplies weights by gain and bias = -gain*threshold. We can include constant terms in threshold. For expression u = x + 9 - y, we can set weights for x and y, and threshold = -9? Because z = gain*(sum weights*x - threshold). If sum = x - y, threshold = -9 => x - y +9. Or use RAW with bias. Easier: use add_h1_threshold with input_weights for variable part, threshold = -constant, gain=G. For u-p-0.5: sum = x - y - p, threshold = -9 +0.5? Let's derive.
+
+We want h1 = tanh(G * (expr - 0.5)) for expr integer >0. The IR threshold: z = G*(sum_i w_i x_i - threshold). So set threshold = 0.5 - constant? If expr = variable_sum + constant. We can put constant in threshold: z = G*(variable_sum - (0.5 - constant)) = G*(variable_sum + constant -0.5). So threshold = 0.5 - constant.
+For direction score: expr = score -1.5. variable_sum = score (dx+dy). threshold=1.5.
+For segment A: u <=9 => 9.5 - u >0. expr = 9.5 - (x+9-y) = 0.5 - x + y. variable_sum = -x + y, threshold = -0.5? Because z=G*(var - threshold) = G*(-x+y +0.5). Set threshold=-0.5. Good.
+Segment B: u >=10 => u -9.5 = x+9-y-9.5 = x - y -0.5. variable_sum=x-y, threshold=0.5.
+DR C: u-p>0 => x+9-y-p -0.5 = x - y - p +8.5. variable_sum=x-y-p, threshold=-8.5.
+DR D: p-u>0 => p - x -9 + y -0.5 = -x + y + p -9.5. variable_sum=-x+y+p, threshold=9.5.
+DR E: 18-u-p>0 => 18 - (x+9-y) - p -0.5 = 8.5 - x + y - p. variable_sum=-x+y-p, threshold=-8.5? Wait z=G*(var - threshold). Want var +8.5. Set threshold=-8.5. Yes.
+DR F: u+p-18>0 => x+9-y+p-18-0.5 = x - y + p -9.5. variable_sum=x-y+p, threshold=9.5.
+
+DL:
+u = x -9 + y.
+G: u>=0 => u+0.5 = x+y-8.5. variable_sum=x+y, threshold=8.5.
+H: u<0 => -u-0.5 = -x - y +8.5. variable_sum=-x-y, threshold=-8.5? z=G*(var - threshold) = -x-y +8.5. threshold=-8.5.
+I: u-p>0 => x+y-9-p-0.5 = x+y-p-9.5. variable_sum=x+y-p, threshold=9.5.
+J: p-u>0 => p - x +9 - y -0.5 = -x - y + p +8.5. variable_sum=-x-y+p, threshold=-8.5.
+K: -u-p>0 => -x+9-y -p -0.5 = -x - y - p +8.5. variable_sum=-x-y-p, threshold=-8.5.
+L: u+p>0 => x -9 + y + p -0.5 = x+y+p-9.5. variable_sum=x+y+p, threshold=9.5.
+
+Direction units:
+Need dx = x - trail_x, dy = y - trail_y.
+DR score = dx+dy = x - trail_x + y - trail_y. threshold=1.5.
+DL score = -dx+dy = -x + trail_x + y - trail_y. threshold=1.5.
+UR score = dx - dy = x - trail_x - y + trail_y. threshold=1.5.
+UL score = -dx - dy = -x + trail_x - y + trail_y. threshold=1.5.
+Use gain G=10.
+
+Need build input_weights dicts for each h1 unit. We can write helper functions in build_policy to create mappings. The IR program has add_spatial_coord_extractor but we can manually build.
+
+Input index function: idx(r,c,ch) = (r*10+c)*6+ch.
+For ball_x weights: for c in 0..9, idx(?, c, 3) but row varies. Ball channel has one 1 at ball row/col. To weight by column c, we need add weight c to all rows r for channel 3 col c. Because if ball at (r,c), input idx(r,c,3)=1, contribution c. So for each r 0..9, c 0..9: mapping[idx(r,c,3)] += w_col[c]. Similarly ball_y: weight -r for all cols c in row r channel3.
+Trail_x/trail_y similarly channel4.
+Paddle_x: paddle only row9, channel0. Weight c for idx(9,c,0). Could also include all rows? Paddle only row9, but safe to use row9 only. If we use all rows channel0, no harm because only row9 active. But use row9.
+
+We can create a function add_linear(prog, name, weights, threshold, gain) where weights is dict input->coefficient (not multiplied by gain). Use prog.add_h1_threshold(name, weights, threshold, gain). It will multiply by gain.
+
+Need be careful: add_h1_threshold expects input_weights dict, threshold, gain. It sets W1[in_idx,u] += gain*w, b1[u] = -gain*threshold. Good.
+
+For h2 gates: use prog.add_h2_gate(name, h1_terms, bias). It sets W2[h1_idx, v] += w, b2[v]=bias. We want pre = G2*(a+b+c -2.5). Since h1 terms are h1 values. We can set h1_terms={a:G2,b:G2,c:G2}, bias=-2.5*G2. Then h2=tanh(pre). Good. G2=10.
+
+Output rules: use prog.set_output_action(action_idx, h2_terms, bias). It sets W3[h2_idx, act] += w, b3[act]=bias. But if multiple rules for same action, bias overwritten? In compile: for rule, if "bias" in rule: b3[act_idx] = float(rule["bias"]). If we call set_output_action multiple times for same action, bias overwritten. We can either include all terms in one rule per action, or set bias once. We'll create one rule for action 3 (right) with h2_terms for DR_r1,DR_r2,DL_r1,DL_r2,UR_dir? Wait UR_dir is h1, not h2. Output rules only h2_terms, cannot reference h1. W3 is h2 x output. We cannot directly use h1 dir units in output. Oops. Output logits = h2 @ W3 + b3, only h2. So up dir h1 cannot directly affect output unless we create h2 units that pass up dir. We can create h2 units for up-right and up-left that are just the h1 dir (or gated). h2 can take h1 terms. So add h2 units:
+12: UR_pass = h1 UR_dir (maybe gain 1, bias 0) => tanh(UR_dir) ~ UR_dir (since ±1). But tanh(±1)=0.76, not ±1. We can use gain 10: h2 = tanh(10*UR_dir) => ±1. But if UR_dir is +1/-1, 10*±1 saturated. Use add_h2_gate(name, {UR_dir:10}, bias=0). Similarly UL_pass.
+Then output right includes UR_pass, left includes UL_pass.
+Alternatively create h2 units for up-right move = UR_dir (saturated). Good.
+
+Need also maybe h2 pass for down? We already have h2 conjunctions.
+
+Total h2: 8 conjunctions + 2 up pass =10. Leaves 22.
+
+Output rules:
+action 3 right: h2_terms {DR_r1:1, DR_r2:1, DL_r1:1, DL_r2:1, UR_pass:1}, bias=3.
+action 1 left: {DR_l1:1, DR_l2:1, DL_l1:1, DL_l2:1, UL_pass:1}, bias=3.
+action 0 no-op: bias=1 (no h2 terms). But set_output_action with empty h2_terms and bias=1.
+Other actions bias maybe -10 to suppress. We can set b3 for 2,4,5 = -10. But output_bias can set all. In IR, output_bias optional list. We can set prog.output_bias = [1,3, -10,3,-10,-10]? But then output rules bias overwrite? Compile: if prog.output_bias is not None: b3[:] = output_bias. Then for each rule, if bias in rule: b3[act]=rule.bias. So we can set output_bias for all, and rules for 0,1,3 with bias. Or just set rules for all actions. Simpler: set prog.output_bias = [1.0, 3.0, -10.0, 3.0, -10.0, -10.0]. Then add output rules for right/left with h2_terms and no bias? But set_output_action always includes bias key? It appends rule with bias float(rule.get? Actually method set_output_action(action_idx, h2_terms, bias=0.0) always includes "bias": float(bias). In compile, if "bias" in rule: b3[act_idx] = float(rule["bias"]). So if we call for right with bias=3, okay. For no-op, call with bias=1. For others, maybe call with bias=-10. Or set output_bias and call rules with bias same. We'll call for all 6 to be safe.
+
+But note: output rule for right with h2_terms and bias=3 will set b3[3]=3. Good. For left bias=3. No-op bias=1. Up/down/fire bias=-10.
+
+Need ensure h2 up pass units are +1/-1. UR_dir h1 is tanh(10*(score-1.5)). For true score=2 => tanh(5)=0.9999, false score=0 => tanh(-15)=-1. h2 pass with gain 10: tanh(10*0.9999)=1, false -1. Good.
+
+Now, potential issue: h1 condition units use gain=10 and thresholds. For true margin 0.5 => pre=5, tanh=0.9999. False margin -0.5 => -5. Good. But some conditions may have margin larger, fine. However linear forms may have values not exactly integer due to float, but okay.
+
+Need verify h1 condition expressions with input weights. Let's define helper to build weights for a linear combination of coordinates:
+We can create a dict and add contributions:
+- ball_x coefficient a: for each r,c: idx(r,c,3) += a*c
+- ball_y coefficient b: for each r,c: idx(r,c,3) += b*r
+- trail_x coefficient c: idx(r,c,4) += c*c
+- trail_y coefficient d: idx(r,c,4) += d*r
+- paddle_x coefficient e: idx(9,c,0) += e*c
+We can combine multiple terms.
+
+Let's list h1 units and their variable_sum coefficients (before gain) and threshold:
+G=10.
+0 DR_dir: var = ball_x + ball_y - trail_x - trail_y. threshold=1.5.
+Coeffs: bx=1, by=1, tx=-1, ty=-1, px=0.
+1 DL_dir: var = -ball_x + ball_y + trail_x - trail_y. threshold=1.5.
+2 UR_dir: var = ball_x - ball_y - trail_x + trail_y. threshold=1.5.
+3 UL_dir: var = -ball_x - ball_y + trail_x + trail_y. threshold=1.5.
+
+DR:
+4 A (u<=9): var = -ball_x + ball_y. threshold=-0.5. (z=10*(-x+y+0.5))
+5 B (u>=10): var = ball_x - ball_y. threshold=0.5.
+6 C (u-p>0): var = ball_x - ball_y - paddle_x. threshold=-8.5.
+7 D (p-u>0): var = -ball_x + ball_y + paddle_x. threshold=9.5.
+8 E (18-u-p>0): var = -ball_x + ball_y - paddle_x. threshold=-8.5.
+9 F (u+p-18>0): var = ball_x - ball_y + paddle_x. threshold=9.5.
+
+DL:
+10 Gseg (u>=0): var = ball_x + ball_y. threshold=8.5.
+11 Hseg (u<0): var = -ball_x - ball_y. threshold=-8.5.
+12 I (u-p>0): var = ball_x + ball_y - paddle_x. threshold=9.5.
+13 J (p-u>0): var = -ball_x - ball_y + paddle_x. threshold=-8.5.
+14 K (-u-p>0): var = -ball_x - ball_y - paddle_x. threshold=-8.5.
+15 L (u+p>0): var = ball_x + ball_y + paddle_x. threshold=9.5.
+
+Check DL K: -u-p>0 => -(x-9+y)-p = -x - y +9 - p. Need >0 => -x-y-p+9 >0. With margin 0.5: -x-y-p+8.5 >0. var=-x-y-p, threshold=-8.5 gives var+8.5. Good.
+DL J: p-u>0 => p -x+9-y >0 => -x-y+p+9 >0; margin 8.5. var=-x-y+p, threshold=-8.5. Good.
+DL L: u+p>0 => x+y-9+p >0; margin 9.5? x+y+p-9 >0 => x+y+p-9.5 >0. var=x+y+p, threshold=9.5. Good.
+
+Now h2 conjunctions:
+16 DR_r1 = AND(0,4,6)
+17 DR_r2 = AND(0,5,8)
+18 DR_l1 = AND(0,4,7)
+19 DR_l2 = AND(0,5,9)
+20 DL_r1 = AND(1,10,12)
+21 DL_r2 = AND(1,11,14)
+22 DL_l1 = AND(1,10,13)
+23 DL_l2 = AND(1,11,15)
+24 UR_pass = pass(2)
+25 UL_pass = pass(3)
+
+Need ensure h2 unit names unique.
+
+Output:
+right (action 3): terms DR_r1,DR_r2,DL_r1,DL_r2,UR_pass each weight 1, bias 3.
+left (action 1): terms DR_l1,DR_l2,DL_l1,DL_l2,UL_pass weight1, bias3.
+no-op (0): bias1.
+up/down/fire: bias -10.
+
+Let's test mentally some states.
+
+State DR: ball y=3,x=0, trail y=4? Wait start ball at (3,0), last same? reset last_x=ball_x,last_y=ball_y, so trail same as ball initially! Direction ambiguous! Important. At reset, trail is same cell, so dx=dy=0. Our policy no-op for first step. But ball starts moving down-right; if paddle no-op, still catch? Start p4, target6. If no-op step1: ball x1,y4, trail x0,y3, direction now DR. Paddle p4. Then down prediction target from y4,x1: u=1+5=6, p4, move right. It has 5 steps to bottom, needs move 2, catch. So initial no-op okay. If ball start (3,9) UL? trail same, no-op, then direction DL, target3, p4 move left, catch. Good.
+
+But after top bounce, trail may same at y=0? Direction ambiguous for one step. Policy no-op, then direction down. Should be okay if paddle aligned.
+
+State DR example: ball y=4,x=1, trail y=5,x=0? Actually after step from start, ball (4,1), trail (3,0), dx=1,dy=1. p4. u=1+5=6, target6. A u<=9 true, C u-p=2>0 true. DR_r1 true. Right logit: DR_r1 +1, DR_r2 -1, DL sums -2, UR_pass -1 => 1-1-2-1+3=0? Wait sum_down_right = DR_r1+DR_r2 = 1 + (-1)=0. UR_pass=-1. bias3 =>2? 0-1+3=2. Left: DR_l1? A true, D p-u<0 false => -1; DR_l2 -1; DL -2; UL -1; bias3 => -1-1-2-1+3=-2. Noop1. Right wins. Good.
+
+State DR target equal: e.g., u=6,p6. A true, C u-p=0 false (threshold 0.5 => false), D p-u=0 false. DR_r1 false, DR_l1 false. Right sum -2, left -2, up -1, bias3 =>0. Noop1 wins. Good.
+
+State DR segment2: u=12,p6. target=6? f(12)=6 equal. B true, E 18-12-6=0 false, F 12+6-18=0 false. No move. Good. u=12,p5 target6>5: E 18-12-5=1 true, right. u=12,p7 target6<7: F 12+7-18=1 true, left.
+
+DL: ball y=4,x=8, trail y=5,x=9? dx=-1,dy=1. u=x-9+y=8-9+4=3, target3. p4 => left. G u>=0 true, I u-p=-1 false, J p-u=1 true. DL_l1 true. Left wins. Good.
+DL negative: x=2,y=4,u=-3,target3. p4 left. H true, K -u-p=3-4=-1 false, L u+p=1 true => left. p2 right: K=3-2=1 true. Good.
+
+Up follow: ball y=8,x=4, trail y=9? Actually after catch, ball y=8, trail y=9? Code new_y=last_y (8), last_y old 9? Wait when ball at y=8 moving down, last_y=8? Let's simulate: ball y=8, last_y=8? Actually previous step y=7, last_y=7, new_y=8. At next step if catch: old ball_y=8, last_y=7? In act, last_x=ball_x, last_y=ball_y before update. If ball at y=8, last_y=8? No, at start of act, self.last_x/self.last_y are from previous state, which equals current ball position? In state, trail is last_x,last_y set after previous act to previous ball position. At the beginning of act, self.ball_x is current, self.last_x is previous. So if ball at y=8, last_y=7 (if moving down). When catch, new_y=last_y=7? Wait code: if new_y==9 and catch: new_y = self.last_y. If ball at y=8 moving down, new_y=9, last_y=7? No, self.last_y is previous position before current step, which is y=7. But current ball_y is 8. So if catch at bottom, it sets new_y=last_y=7, not 8! That means ball bounces back to row7, not row8. Let's verify: Ball moves from y=8 to9, last_y=7, so new_y=7. It skips y=8? It was at y=8 before step, after step y=7. So ball goes from 8 to7 (up) in one step, not 8. Trail after step = last_y=7? Actually last_x/y set at start to old ball (8), then new_y=7, state trail=old (8), ball=7. So direction up. Paddle at row9. So after catch, ball y=7, x=p (if new_x==pos) or old x? If new_x==pos, x=p. Relative0. Good. Up follow from y=7.
+
+If ball at y=7 moving up, dx=+1, p=4? It will follow. Good.
+
+Up pass h2: UR_dir true if dx=1,dy=-1. At y=7, trail y=8, dx=1,dy=-1. Good.
+
+Now, potential issue: h1 direction units use trail. When ball hits wall, trail and ball may have same x? Example ball at x=0 moving up-left: old x=1? Let's simulate: ball x=1,y=7, dx=-1,dy=-1, trail x=2,y=8. Step: new_x=0, no wall? new_x=0 valid, dx remains -1? Actually wall reflection only if new_x<0 or >9. From x=1 to0, no reflection, dx still -1. Next step from x=0 to -1: new_x=0, dx flips to +1. last_x=0, new_x=0, trail x=0, ball x=0, dx inferred 0, dy? y changes. Direction ambiguous for x but dy up. Our direction units: dx=0,dy=-1. UR score=0-(-1)=1? threshold1.5 false; UL score=0-(-1)=1 false. All false. Policy no-op for that step. Paddle may not follow dx flip. Could cause misalignment. How often? One step at wall. If paddle was aligned, ball x stays0, paddle maybe moves left? If previous step dx=-1, paddle moved left. Suppose ball x=0,p=0, dx=-1,dy=-1. Step: ball new_x=0 (reflect), dx=+1, y up. Paddle action left from0 stays0. Relative0. Our policy no-op, paddle stays0. Good. If p=1, previous step? Ball x=0,p=1, dx=-1. Paddle should move left to0. Step: ball stays0, paddle left to0. Relative0. No-op okay. If p=0, no-op okay. So wall ambiguity not fatal.
+
+Top bounce ambiguity: ball y=0 moving up, new_y=0, dy=0, dx maybe ±1. Direction units: dx=±1,dy=0. Scores: DR=1, DL=1, UR=1, UL=1? threshold1.5 false. No-op. Paddle stays. Ball next step down, direction down. If aligned, okay. If not, down prediction can correct with 9 steps.
+
+Now, sticky actions: with probability 0.1 repeats previous action. Our policy deterministic; sticky may cause slight errors. Could mitigate by using no-op when target equal? Sticky no-op okay. If moving toward target, sticky may repeat move, overshoot? Example need move right 2 steps, sticky may repeat right extra, overshoot. But softmax sampling also stochastic. We can make logits strong to reduce sampling noise, but sticky still. Could design policy to avoid overshoot by moving only when target difference >1? But then may be too slow. Sticky probability 0.1, expected overshoot small. Could use no-op when close? Maybe target equal no-op. If target difference 1, moving may overshoot due to sticky. But if no-op, may miss if ball moves. Need balance. Since paddle speed equals ball, if target difference 1 and ball moving down, you need move 1. Sticky may repeat previous action from earlier, not necessarily current. Hard. Strong logits okay.
+
+Sampling: softmax of logits. We set true logit 2, false 0, noop1. Probability right = e^2/(e^2+e^0+e^1+e^-10...) = 7.389/(7.389+1+2.718)=0.68. Not strong enough! Need higher logits to make near deterministic. We can increase bias and weights. But tanh h2 saturated ±1, sum range. We can scale output weights. For true right: sum_down_right=0, UR_pass=-1, bias maybe 10 => logit 9. False: -2-1+10=7. Noop maybe 0. Then true prob e9/(e9+e7+1) ~0.88. Need stronger: bias 20, noop 0, false 17, true 19? Difference 2 only because true vs false sum difference 2 (one true vs none? Let's compute). For down right true: right logit = bias +0 -1 = b-1. Left false = b-3. Noop = bN. Difference right-left =2. To make right probability high, need b-1 - (b-3)=2 fixed if weights 1. We can scale h2 terms weights to increase difference. If each h2 term weight S, true sum_down_right = S (one true) + (-S) (other false) =0? Wait if two right units, one true +S, one false -S =>0. False both -S => -2S. Difference true vs false =2S. Up pass also -S. So right true = b - S, right false = b -3S. Difference 2S. We can set S=10, b=30, noop=0. True=20, false=0, left maybe? For right true, left false = b -3S =0. Noop0. Prob right e20/(e20+1+1) ~0.999999. Good. For up true: right = b + S (UR_pass true) + down sums -2S? Wait down right units false: each -S, sum -2S. UR_pass +S. total b - S. Left: down left -2S, UL_pass -S => b -3S. Difference 2S. Good. For no move (target equal): right = b -3S? Down right false -2S, UR -S => b-3S. Left same. Noop bN. Set bN=0, b=3S? Then false =0, tie with noop. Need false < noop. Set b=3S+1? Then false=1, true= S+1? Let's choose S=10, b=35, bN=0. Down true: b - S =25. Down false: b -3S =5. Noop0. True prob e25/(e25+e5+1) ~1. False vs noop: e5 vs1, false action may be chosen with prob ~0.993 when no move! That's bad: when target equal, both right/left false logits 5, noop0, so it will move randomly left/right, causing drift. Need make false lower than noop. Set b=3S? false=0, tie. Set b=3S-1 => false=-1, true=S-1=9, noop0. Then true wins, false loses. Good. For up true: b - S = -1? If b=29, S=10, up true = -1, noop0, bad. Need b large enough for true > noop, but false < noop. True = b - S (for down/up true? Down true b-S, up true b-S). False = b -3S. Need b-S > bN and b-3S < bN. Choose bN=0, S=10: b>10 and b<30. Choose b=20. True=10, false=-10. Good. Noop0. True prob e10/(e10+e-10+1) ~0.99995. False prob tiny. Great. So set output weight S=10, bias b=20, noop=0, other actions -20.
+
+But h2 terms weights S=10. For right rule: h2_terms each weight 10. Bias 20. Left same. Noop bias 0. Up/down/fire bias -20.
+
+Check down right true: right = 10*(DR_r1+DR_r2+DL_r1+DL_r2+UR_pass) +20. DR_r1=1, DR_r2=-1, DL_r1=-1,DL_r2=-1,UR=-1 => sum=-1? Wait 1-1-1-1-1 = -1. times10 +20 =10. Good. Left: DR_l1=-1,DR_l2=-1,DL_l1=-1,DL_l2=-1,UL=-1 => -5*10+20=-30. Noop0. Right wins.
+Down right false (target equal): right sum all -1? DR_r1=-1,DR_r2=-1,DL=-1,-1,UR=-1 => -5 => -30. Left same -30. Noop0 wins.
+Up right true: UR_pass=1, UL=-1, down right units? Direction false, each -1: DR_r1=-1,DR_r2=-1,DL_r1=-1,DL_r2=-1 sum right = -4+1=-3 => -30+20=-10. Left: down left -4, UL=-1 => -5 => -30. Noop0. Oops up true right logit -10, loses to noop! Because down false units contribute -4S, up pass +S, total -3S. For down true, one down right unit true, other down right false, two down left false, up false: +1-1-1-1-1=-1. For up true, no down right true: -1-1-1-1+1=-3. Need bias larger to make up true >0, but down false <0. Conditions:
+Down true: b - S > 0 => b > S.
+Up true: b - 3S > 0 => b > 3S.
+Down false: b -5S < 0 => b <5S.
+Choose b=4S. Then down true=3S, up true=S, down false=-S. Good. With S=10, b=40, noop=0. Down true 30, up true10, false -10. Great. Other actions -20.
+
+What about down left true: left logit b - S =30, right false b -5S=-10. Good.
+Up left true: left b -3S=10. Good.
+No move: both b -5S=-10, noop0. Good.
+
+So output weights S=10, bias b=40, noop=0, others -20.
+
+But h2 conjunction units are tanh, not exactly ±1; false maybe -0.99999, true 0.99999. Fine.
+
+Need ensure h2 pass up units: if UR_dir true, h2=tanh(10*0.9999)=1; false -1. Good.
+
+Now, h1 gain G=10. h2 AND gain G2=10. Could use higher for reliability, but tanh saturates. G=10 enough. If linear form margin 0.5, pre=5. tanh=0.999909. h2 AND all true: 10*(3*0.9999 -2.5)=4.9997 =>0.9999. Good.
+
+Potential issue: h1 condition units may be affected by bricks? No, only ball/trail/paddle. Good.
+
+Now, need consider ball at bottom row? Episode ends when ball reaches bottom without caught. Our policy may see ball y=9? Terminal after act, no action. Not relevant.
+
+Need consider ball in brick rows with trail same? Direction maybe ambiguous if ball just bounced off brick? When ball hits brick, new_y=last_y, so ball y same as last_y? Example ball y=4 moving up, last_y=4? Wait before step ball y=4, last_y=5? Actually if moving up from y=5 to4, last_y=5. Next step from y=4 to3 brick: last_y=4, new_y=4 (brick bounce), ball y=4, trail y=4 (same), x changes. Direction dy=0, dx=±1. Our direction units false (score=1). Policy no-op for one step. Ball now moving down, but trail same y, x previous? After brick bounce, ball x changed by dx, trail x old. dx can be inferred from x difference, dy=0. Next step ball y=3? Wait if new_y=last_y=4, ball stays y=4, dir down. Next act: last_y=4, new_y=5, trail y=4, ball y=5, dy=1, dx same. Direction down. So one no-op step at bounce. Paddle may not move, but ball has 5 steps to bottom; if aligned, okay. If not, down prediction next step can correct. Good.
+
+But at brick bounce, ball y=4, x maybe p? If aligned, paddle at x? Paddle may have been following up, so p=x. No-op keeps p, ball x changes? At bounce step, ball x changes by dx (from old x to new x) while paddle no-op, so relative becomes -dx? Let's simulate: before bounce step, ball y=4,x=8,p=8, dx=+1,dy=up. Our up policy would move right, but if brick bounce occurs in this step, action right moves p to9. Ball new x=9,y=4 (brick bounce), trail x=8. Relative p=9, ball x=9, aligned. Good. If direction ambiguous? The action is chosen before step based on previous state (up-right), so it moves right. After step, direction ambiguous, next action no-op, ball x=9,p=9. Good. So no issue.
+
+What if ball hits wall while moving up: previous state up-left at x=1,p=1, action left moves p to0. Ball new x=0 (wall), p=0. Next ambiguous no-op, aligned. Good.
+
+Now, down prediction after brick bounce: state ball y=4,x=9, trail y=4,x=8? dy=0, direction ambiguous, no-op. Next step ball y=5,x=0? Wait dx after wall? If x=9 and dx=+1, next step new_x=10->9, dx flips to -1, y=5. Trail x=9, ball x=9, dx=0,dy=1 ambiguous. No-op. Paddle p=9. Ball now moving down-left? Actually after wall, dx=-1, but trail same x, so ambiguous. Next step ball x=8,y=6, trail x=9,y=5, direction DL. Paddle p=9. Down prediction target? y6,x8, u=x-9+y=8-9+6=5, target5, p9, move left. It has 3 steps to bottom, needs move4, may miss. But this scenario: ball at right wall moving down, paddle at9. Actual ball path: y5 x9, y6 x8, y7 x7, y8 x6, y9 x5. Paddle at9 needs move left4 in 4 steps? From y5 to9: 4 steps. At observation y6, 3 steps left, needs 4, miss by1. But if previous ambiguous step at y5, policy no-op, lost one step. Could we handle ambiguous dy=0,dx=±1 by assuming down? At wall/brick bounce, ball is actually moving down after the step, but trail same y. We can infer dx from x difference? If trail same y but x differs, dx known, dy=0. We could treat as down (dy=+1) for policy, because ball will move down next. That would allow paddle to move one step earlier. Good idea.
+
+Direction inference: If dy=0 and dx=±1 (ball bounced vertically at wall? Actually vertical bounce at top/brick/wall? At wall, dx=0,dy=±1; at brick/top, dy=0,dx=±1). We can define effective direction:
+- If dy=+1: down.
+- If dy=-1: up.
+- If dy=0 and dx=+1: treat as down-right? Because after vertical bounce, ball moving down with dx=+1. But at top bounce, ball at y=0, trail y=0, dx=±1, next dy=+1, so treat down. At brick bounce, same. Good.
+- If dy=0 and dx=0: ambiguous (reset or top? top with dx? top bounce dx unchanged, so dx=±1; reset dx=0). Treat no-op.
+- If dx=0 and dy=±1 (wall bounce): treat as up/down with dx? At wall, dx flips, but trail same x, dy known. We don't know new dx? If ball at x=0, trail x=0, dy=+1, it is moving down-right (dx=+1) after left wall. If at x=9, moving down-left. We can infer dx from wall position: if x=0, dx=+1; if x=9, dx=-1. But our direction units using dx=0 fail. Could handle by treating dx=0,dy=+1 as down with dx determined by x? Need more units. But wall bounce one step; maybe not critical. However right wall example above caused miss. We can improve by handling dx=0,dy=±1 using ball x at wall.
+
+Maybe we can modify direction indicators to use effective dx/dy:
+- dy_eff = dy if dy !=0 else 1 (if dx !=0)?? For vertical bounce, treat down.
+- dx_eff = dx if dx !=0 else (1 if ball_x==0 else -1 if ball_x==9 else 0). For wall bounce.
+But implementing dx_eff with linear thresholds may need extra units.
+
+Simpler: Add h1 units for "down-right effective" that are true if (dy=1 and dx=1) OR (dy=0 and dx=1) OR (dy=1 and dx=0 and x=0?) etc. Could be complex.
+
+Maybe we can adjust direction score thresholds to treat dy=0,dx=±1 as down. For DR_dir, we want true if dx=1 and (dy=1 or dy=0). Score dx+dy: for dx=1,dy=1 =>2; dx=1,dy=0=>1; dx=1,dy=-1=>0. If threshold=0.5, DR true for dy=0 too, but also? DL score -dx+dy: for dx=1,dy=0 => -1, false. UR score dx-dy: for dx=1,dy=0=>1, would also true if threshold0.5. Need distinguish up vs down when dy=0. We want treat dy=0 as down, so DR/UL? For dx=1,dy=0 => DR true, UR false. For dx=-1,dy=0 => DL true, UL false. We can set direction units:
+DR: dx=1 and dy>=0. Linear? dx+dy >=1? For dx=1,dy=1 score2; dx=1,dy=0 score1; dx=1,dy=-1 score0. threshold 0.5. But what about dx=0,dy=1 score1 (wall bounce down) would make DR true incorrectly. Need exclude dx=0. Could use dx+dy and dx? Maybe DR = dx=1 and dy>=0. Intersection not linear. But maybe we can accept dx=0,dy=1 as DR? If ball at left wall moving down, dx should be +1, so okay. If ball at right wall moving down, dx should be -1, but dx=0,dy=1 would make DR true (wrong) and DL? DL score -dx+dy=1, also true if threshold0.5. Both DR and DL true, causing both right/left? Bad.
+
+Could use wall position to disambiguate. Maybe not worth.
+
+Alternative: Keep original direction (dy=0 false) and accept one-step delay. The right wall example may cause occasional misses. How often? Ball hits walls often. One-step delay at wall can be fatal if near bottom. But maybe down prediction from previous step before wall? Let's analyze right wall scenario more carefully with original policy.
+Ball moving down-right, hits right wall at x=9. Suppose at y=5, x=9, dx=+1,dy=+1, trail x=8,y=4. Direction DR. Down prediction target: u=x+9-y=9+4=13, target=5 (f13=5). Paddle should move left to5. If paddle follows, it may be at? Let's simulate from catch at x9? Suppose ball after catch at x9, p9, moving up-right? It hits right wall while up, then down. At wall bounce, one no-op. But maybe paddle already positioned for target5? Let's simulate a full cycle.
+Catch at p9, ball x9, dx? If catch via new_x==9 from x8 moving right, dx flips to left, so ball up-left, not right. To get ball down-right at right wall, maybe after wall bounce. Hard.
+If ball moving down-right and hits right wall at y=5, before wall step state y=4,x=8,DR. Target u=8+5=13,target5. Paddle should be moving left. It may be at6? Step to wall: ball x9,y5, p5 (if moved left). Next state ambiguous (dx=0,dy=1), policy no-op, p5. Ball next y6,x8, direction DL. Target from y6,x8: u=8-9+6=5,target5. Paddle p5, catch. Good! The one no-op didn't hurt because paddle already at target. If paddle wasn't at target, maybe. Down prediction before wall gave correct target after wall? For DR hitting right wall, target computed with reflection already accounts for wall, so paddle can be at final target before wall. The ambiguous step no-op at target is okay. In my earlier example p9 at wall was not following down prediction. If policy had been following, p would be5. So okay.
+
+Similarly brick bounce: before bounce, up policy follows dx, not down target. At bounce ambiguous no-op, but paddle aligned. Next down prediction target may be same as aligned? If aligned, target=p, no-op. Good.
+
+Thus original direction false for dy=0 may be okay.
+
+Now, need consider initial trail same: no-op one step, okay.
+
+Now, can we improve up policy by following dx but also if target down? We use up follow. Good.
+
+Let's think about score. This policy should keep ball alive indefinitely? It may get stuck in a loop breaking same bricks? It will break bricks, when all cleared new rows appear. It should continue. Need ensure it doesn't miss due to sticky/sampling. Strong logits reduce sampling. Sticky may cause overshoot. Could we make policy more robust to sticky by using no-op when target difference <=1? But then may miss. Let's analyze sticky effect. With probability 0.1, previous action repeated. If policy says right, but previous action was left, sticky may left. This can cause errors. A deterministic policy with strong logits still subject. Could design hysteresis: move only when target difference >=2, no-op when 1, to avoid overshoot? But if ball moving down and target diff1, you need move1; no-op may miss. However sticky probability low; expected score maybe okay. RL networks also face sticky.
+
+Could use action probabilities to account for sticky? Not needed.
+
+Now, need ensure network architecture: h1_dim=32, h2_dim=32. We use 16 h1, 26? h2 26? Actually h2 units 26? We listed 26? 0-25 =26? Let's count: h1 16 (0-15). h2: 8 conjunctions (16-23), 2 pass (24,25) =10. Wait indices: h2 0-9. Good. We have plenty.
+
+Need write build_policy() returning MLPCompilerBackend.compile(program). The code block should include imports? The prompt says return one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program). It likely assumes MLPProgram and MLPCompilerBackend are available in environment. We can just define build_policy using them. But to be safe, include no imports? The IR classes are provided. We can reference MLPProgram, MLPCompilerBackend. If code executed in a context where they are imported. Could include from .ir import MLPProgram? But maybe not. The prompt says use following IR and backend. Usually they expect code block with build_policy only, assuming names available. We can include helper functions inside.
+
+Need ensure no training/testing/forward. Just build.
+
+Now, let's verify IR compile details.
+MLPProgram(input_dim=600,h1_dim=32,h2_dim=32,output_dim=6,activation="tanh")
+add_h1_threshold(name, input_weights, threshold, gain). It appends unit. input_weights dict int->float. It multiplies by gain. If input_weights empty? Not.
+add_h2_gate(name, h1_terms, bias). h1_terms dict name->float. It references h1 names. Good.
+set_output_action(action_idx, h2_terms, bias). h2_terms dict name->float.
+output_bias optional. We can set prog.output_bias = [0.0, 40.0, -20.0, 40.0, -20.0, -20.0]? But then set_output_action bias overwrites. We can just set rules for all actions. For actions with no h2 terms, set_output_action(0, {}, 0.0), etc. The method requires h2_terms dict; empty okay. It will set bias. For right/left, include terms and bias 40.
+
+But note: compile output_bias if not None sets b3, then rules set bias. If we don't set output_bias, b3 initially zeros, rules set all actions. Good.
+
+Need ensure h2_terms names exist. We'll use names.
+
+Now, build input weights helper.
+
+Pseudo:
+def build_policy():
+    prog = MLPProgram(input_dim=600, h1_dim=32, h2_dim=32, output_dim=6, activation="tanh")
+    G = 10.0
+    def idx(r,c,ch): return (r*10+c)*6+ch
+    def make_weights(bx=0,by=0,tx=0,ty=0,px=0):
+        w={}
+        for r in range(10):
+            for c in range(10):
+                val=0.0
+                if bx: val += bx*c
+                if by: val += by*r
+                if val: w[idx(r,c,3)] = w.get(idx(r,c,3),0.0)+val
+                val=0.0
+                if tx: val += tx*c
+                if ty: val += ty*r
+                if val: w[idx(r,c,4)] = w.get(idx(r,c,4),0.0)+val
+        if px:
+            for c in range(10):
+                w[idx(9,c,0)] = w.get(idx(9,c,0),0.0)+px*c
+        return w
+    def add_h1(name, bx,by,tx,ty,px, threshold):
+        prog.add_h1_threshold(name, make_weights(bx,by,tx,ty,px), threshold, G)
+
+But make_weights loops 100 each unit, 16 units, fine. Could optimize but not needed.
+
+Need be careful: For ball_y weight by*r, if by negative, val negative. Good.
+
+Add h1:
+add_h1("DR_dir", 1,1,-1,-1,0, 1.5)
+add_h1("DL_dir", -1,1,1,-1,0, 1.5)
+add_h1("UR_dir", 1,-1,-1,1,0, 1.5)
+add_h1("UL_dir", -1,-1,1,1,0, 1.5)
+add_h1("DR_A", -1,1,0,0,0, -0.5)
+add_h1("DR_B", 1,-1,0,0,0, 0.5)
+add_h1("DR_C", 1,-1,0,0,-1, -8.5)
+add_h1("DR_D", -1,1,0,0,1, 9.5)
+add_h1("DR_E", -1,1,0,0,-1, -8.5)
+add_h1("DR_F", 1,-1,0,0,1, 9.5)
+add_h1("DL_G", 1,1,0,0,0, 8.5)
+add_h1("DL_H", -1,-1,0,0,0, -8.5)
+add_h1("DL_I", 1,1,0,0,-1, 9.5)
+add_h1("DL_J", -1,-1,0,0,1, -8.5)
+add_h1("DL_K", -1,-1,0,0,-1, -8.5)
+add_h1("DL_L", 1,1,0,0,1, 9.5)
+
+Check DR_E and DR_C same var? DR_C var x-y-p threshold -8.5; DR_E var -x+y-p threshold -8.5. Different.
+
+h2 AND helper:
+G2=10.0
+def add_and(name, a,b,c): prog.add_h2_gate(name, {a:G2,b:G2,c:G2}, bias=-2.5*G2)
+add_and("DR_r1","DR_dir","DR_A","DR_C")
+...
+Pass:
+prog.add_h2_gate("UR_pass", {"UR_dir":10.0}, bias=0.0)
+prog.add_h2_gate("UL_pass", {"UL_dir":10.0}, bias=0.0)
+
+Output:
+S=10.0
+prog.set_output_action(0, {}, 0.0)
+prog.set_output_action(1, {"DR_l1":S,"DR_l2":S,"DL_l1":S,"DL_l2":S,"UL_pass":S}, 40.0)
+prog.set_output_action(2, {}, -20.0)
+prog.set_output_action(3, {"DR_r1":S,"DR_r2":S,"DL_r1":S,"DL_r2":S,"UR_pass":S}, 40.0)
+prog.set_output_action(4, {}, -20.0)
+prog.set_output_action(5, {}, -20.0)
+return MLPCompilerBackend.compile(prog)
+
+Need check output bias for no-op 0, false -10? With S=10,b=40: false down = 40 +10*(-5)= -10. Good. Up true =40+10*(-3)=10. Down true=40+10*(-1)=30. Noop0. Good.
+
+But what about state where both DR and DL direction false but up pass false, down h2 false: right logit -10, left -10, noop0. Good.
+
+What about state where direction DR and target>p, but also UR_pass? UR_dir false -1. Good.
+
+Now, potential issue: h2 AND units use h1 indicators that may be +1 for conditions true regardless of direction. For DR_r1, if DR_dir false but A,C true, h2 false. Good.
+
+Now, need verify h1 condition DR_A and DR_B are mutually exclusive and cover all u. u integer 0..18. DR_A true if -x+y+0.5 >0 => y - x > -0.5 => y >= x? Since integer, y-x >=0 => u=x+9-y <=9. DR_B true if x-y-0.5>0 => x-y >=1 => u>=10. Good. No gap.
+DL_G true if x+y-8.5>0 => x+y>=9 => u=x+y-9 >=0. DL_H true if -x-y+8.5>0 => x+y<=8 => u<0. Good.
+
+Sign conditions margins:
+DR_C true if x-y-p+8.5>0 => x-y-p > -8.5 => u-p = x+9-y-p >0? u-p = x-y+9-p. Condition x-y-p+8.5>0 => x-y-p > -8.5 => x-y+9-p >0.5 => u-p >0.5 => integer >=1. Good.
+DR_D true if -x+y+p-9.5>0 => p-u >0.5. Good.
+DR_E true if -x+y-p+8.5>0 => 18-u-p = 18-(x+9-y)-p =9 -x +y -p? Wait 18-u-p =18 -x -9 +y -p =9 -x +y -p. Condition -x+y-p+8.5>0 => 9 -x +y -p >0.5 => 18-u-p >0.5. Good.
+DR_F true if x-y+p-9.5>0 => u+p-18 = x+9-y+p-18 = x-y+p-9 >0.5. Good.
+DL_I: x+y-p-9.5>0 => u-p = x+y-9-p >0.5. Good.
+DL_J: -x-y+p+8.5>0 => p-u = p-x+9-y >0.5. Good.
+DL_K: -x-y-p+8.5>0 => -u-p = -x+9-y-p >0.5. Good.
+DL_L: x+y+p-9.5>0 => u+p = x+y-9+p >0.5. Good.
+
+Direction margins:
+DR_dir true if x - tx + y - ty -1.5 >0. For normal DR dx=1,dy=1 score2 =>0.5>0. For DL score0 => -1.5<0. For UR score0. For UL -2. For dx=1,dy=0 score1 => -0.5 false. Good.
+
+Now, one more issue: The input channel mapping in prompt: channel 0 player, 1 danger, 2 reward, 3 projectile, 4 trail, 5 gauge. The game's state channels originally paddle=0, ball=1, trail=2, brick=3. The wrapper maps as described. We use channel 3 for ball, 4 trail, 0 paddle. Correct.
+
+Now, need consider that a cell can be 1 in multiple channels? Ball and trail can coincide; then both channel3 and4 1. Our linear forms handle. Paddle and ball can coincide at row9? Terminal maybe; but if ball at row9 and paddle same, catch occurs in act before observation? Observation after act may have ball at row7/8, not row9. If terminal, no action.
+
+Now, could bricks channel affect ball/trail? No.
+
+Now, need think if policy should use no-op when target equal. Our output no-op wins when false. But due to h2 false not exactly -1, false logit maybe -9.999, noop0, good.
+
+Now, potential problem: h2 AND units with bias -25 and weights 10. If h1 indicators are not exactly ±1 but e.g., true 0.9999, false -0.9999. All true pre=10*(2.9997-2.5)=4.997 =>0.9999. Two true one false: 10*(0.9999+0.9999-0.9999-2.5)= -15.0003 => -1. Good. If one h1 condition is near 0 due to boundary? We set margins 0.5, so no.
+
+Now, need maybe use gain G=20 for h1 to be safer. But thresholds with margin 0.5 => pre=10, tanh ~1. G=20 okay. h2 AND with h1 ±1. Use G2=10. Could set G=20. No downside except float. Use G=10 enough. Maybe G=20 for direction to handle any float error. Let's use G=10 or 20? Values |v|<=1e6. G=20 gives W1 weights up to 20*9=180, fine. h1 true pre=10, false -10. More saturated. Use G=20. h2 AND G2=10. Output S=10. Good.
+
+If G=20, h1 condition true margin 0.5 => pre=10, tanh 0.9999999959. Good.
+
+Now, need ensure add_h1_threshold with gain=20 and threshold e.g., -8.5 gives bias -20*(-8.5)=170. W1 weights e.g., ball_x c*20 up to180. Fine.
+
+Now, let's consider if h1 units for DR_A and DR_B could be true simultaneously due to float? No.
+
+Now, maybe we can add a h2 unit for "down_dir" to reduce false contributions? Not needed.
+
+But output false logit -10, noop0. If both right/left false, no-op. However if one of right/left h2 units accidentally true due to condition but direction false? AND prevents. Good.
+
+Now, let's think about game score. The policy may not break bricks optimally but should survive. Could there be a scenario where up follow dx leads to paddle at wall and ball bounces off brick to other side, causing miss? If aligned, catch. If ball hits brick, dx unchanged, so alignment maintained. If ball hits wall, dx flips, but paddle at wall? If aligned at wall, paddle at same wall, dx flips, next up follow will move inward, ball moves inward, alignment maintained. Good. If ball hits top, dy flips, dx unchanged, alignment maintained, down prediction target=p, no-op, catch. So if alignment achieved, it's stable. Down prediction achieves alignment when ball moving down. If sticky/sampling causes misalignment, down prediction can correct if enough time. Up follow maintains whatever misalignment. So key is down prediction. It should be exact, so if ball moving down and paddle has enough time, it will align. Is there always enough time? Ball moving down from y to9, time t=9-y. Paddle may be at p, target f(u). Distance |target-p| could be up to9. If t < distance, cannot reach. This can happen if paddle was mispositioned. But if policy has been following, distance should be <=t. Initial: t=6, distance2. After catch, ball moving up, alignment. After brick bounce, ball moving down at y=4, alignment, distance0. After top bounce, y=0, alignment, distance0. So okay. If sticky causes off by1, t likely enough. If ball moving down from y=8, t=1, distance could be1, okay; if off by2, miss. Sticky could cause off by1. Maybe okay.
+
+Could improve by when ball moving down and target difference > t (unreachable), choose action that minimizes final distance? Our policy moves toward target, which is optimal. If unreachable, still moves toward. Good.
+
+Now, need consider sampling: logits true 30, false -10, noop0. Probability true ~1 - e-30. Very deterministic. Good.
+
+Now, final answer format. User asked: "First describe your design briefly (the strategy, and what the hidden units compute), then write the edits block." But final instruction: "Use the following NeuralCompiler IR and backend to build a policy. Return one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program). Do not train, test, run model forward passes or use feedback." We need decide final content. I think provide brief design, then a Python code block with build_policy. Maybe also mention that this code compiles to the required weights. But they specifically said "then write the edits block". Could we include an edits block instead of build_policy? The last instruction likely from a different wrapper; maybe they will parse build_policy. The prompt includes "Use the following NeuralCompiler IR and backend to build a policy. Return one complete Python code block defining build_policy()..." This is likely the actual evaluation. So final should be one Python code block. But to satisfy initial, maybe include design text before code. "Return one complete Python code block" might mean only code block, but we can have text? It says first describe design, then write edits block. I'll include a concise design paragraph, then a single Python code block. The code block will be Python, not edits. If they expected edits, maybe fail. Could we make the Python code block also contain an edits block? No.
+
+Maybe we can include both: a Python code block defining build_policy, and after it an edits block? But "one complete Python code block" and "only LAST edits block read". If we include an edits block, it might be read instead. But the final instruction says use IR/backend. The safe route for this prompt (which explicitly provides IR and backend) is to output build_policy code. The earlier "edits block" may be generic, but final overrides. However the user says "YOUR TASK: write, from scratch, the weights... HOW TO WRITE THE WEIGHTS... Write a code block whose opening line is three backticks followed by the word edits... Use the following NeuralCompiler IR and backend to build a policy. Return one complete Python code block defining build_policy()..." This is contradictory. Maybe they want the final answer to be an edits block, but also to use IR/backend in the code? Wait: "Use the following NeuralCompiler IR and backend to build a policy. Return one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program)." This could be an additional instruction from the system, not the user? It is in the user prompt. It likely means don't write raw edits; write build_policy. The "HOW TO WRITE THE WEIGHTS" may be from original task, but the final says use IR. In such cases, follow final explicit.
+
+Could we write build_policy that returns compiled weights, and also the code block opening line is ```python, not edits. Good.
+
+Need ensure code is self-contained enough. It references MLPProgram and MLPCompilerBackend. If not imported, maybe NameError. The prompt says use following IR and backend; likely they are in namespace. We can include a fallback import? But relative import .ir may not work. Better not.
+
+Could include:
+def build_policy():
+    from .ir import MLPProgram
+    from .backend import MLPCompilerBackend
+But if names already available, import may fail depending on package. The prompt says return code defining build_policy, likely executed in an environment where these classes are defined. Adding imports could break. Avoid imports.
+
+Now, let's think if the IR's add_h1_threshold with input_weights dict and gain multiplies weights. Our make_weights returns coefficients. Good.
+
+Potential issue: The IR's add_h1_threshold name "THRESHOLD" uses input_weights and threshold, gain. It does not allow raw bias separate. We use threshold to encode constants. Good.
+
+Potential issue: For h1 units with threshold negative, bias = -gain*threshold positive. Good.
+
+Potential issue: h2 gate with h1_terms weights 10 and bias -25. If h1 unit is not exactly ±1 but tanh, okay.
+
+Potential issue: Output rules with empty h2_terms and bias. The method set_output_action expects h2_terms Dict[str,float]; empty okay. It will set bias. For actions 2,4,5, we call with empty and -20. Good.
+
+Now, let's maybe add comments in code for clarity. Fine.
+
+Need maybe set prog.output_bias? Not necessary. But if we call set_output_action for all actions, b3 set. Good.
+
+Now, let's manually compute some logits with S=10,b=40:
+- Down right true: right h2 sum: DR_r1=1, DR_r2=-1, DL_r1=-1, DL_r2=-1, UR_pass=-1 => -1 => -10+40=30. Left: all -1 => -50+40=-10. Noop0. Good.
+- Down left true: left30, right-10.
+- Up right true: UR_pass=1, UL=-1, down right units all -1 (4) => sum -3 => -30+40=10. Left: down left 4 -1, UL -1 => -5 => -10. Noop0. Right wins.
+- Up left true: left10.
+- No direction: all h2 -1? Up pass -1, down 8 -1 => right sum -5 => -10, left -10, noop0.
+Good.
+
+Now, consider if both DR_r1 and DR_r2 could be true due to A and B both true? No. If both true, right sum +1+1-1-1-1=-1 still? Actually if A,B both true (impossible), C,E maybe, sum could +1? Not issue.
+
+Now, need think about h1 DR_A/B using ball_y. Ball_y input from ball channel. If ball and trail same, y same. Good.
+
+Now, maybe we should include brick channel to handle all bricks cleared? When all bricks cleared, new rows appear immediately when ball reaches bottom? Code: if new_y==9 and no bricks, brick_map[1:4]=1. It resets bricks before paddle catch? If ball reaches bottom and no bricks, it adds bricks, then checks paddle. So if all bricks cleared, new rows appear even if ball lost? It adds then terminal if not caught. Not relevant.
+
+Policy ignores bricks; when bricks cleared, up follow may not have brick to bounce, ball goes top. Alignment maintained, down prediction catches. Good.
+
+Now, could ball get stuck bouncing between bricks and walls without reaching bottom? It will eventually. Policy follows.
+
+Now, let's consider if ball moving up and dx=+1, but paddle at 9. Up pass right logit 10, but action right at wall no-op. Paddle stays9. Ball may hit right wall, dx flips, alignment? If ball x=9,p=9, dx=+1, next step ball x=9 (wall), dx=-1, p=9 (right no-op). Aligned. Good.
+
+If ball moving up-right, paddle at8, ball x=8, action right to9, ball x=9, aligned. Good.
+
+Now, one subtlety: Paddle collision side determines outgoing dx. If ball is aligned (x=p) while moving up, it will hit brick/wall/top, not paddle. When it comes down, if aligned, at y=8 x=p, moving down. It will catch via old ball_x==pos? Let's see: ball y=8,x=p, dy=down, dx maybe. Next step new_y=9, new_x=p+dx. Code checks if ball_x == pos (old x=p) first, so catch and dx unchanged, new_y=last_y=7. So ball bounces with same dx, not flipped. Paddle follows up same dx, alignment. This creates a stable loop where ball bounces directly above paddle, dx unchanged, breaking bricks directly above? It may break a vertical column? If dx unchanged, ball goes up same direction, hits brick/wall, comes down same direction, catches center, repeats. It may break bricks along a diagonal? If dx unchanged, x changes each up/down cycle. It will break bricks at successive columns. Good. If catch via side (new_x==pos), dx flips, also okay.
+
+Now, down prediction target when ball moving down and aligned: u = x + (9-y)*dx. If x=p and dx=+1, target = reflect(p + t). But if ball is directly above paddle, it will catch at old x=p, not at target? Wait if ball moving down and x=p at y=8, target formula with dx=+1 gives p+1 (or reflect), but actual catch occurs because old ball_x==pos, even though new_x=p+1. The ball is caught at old x, not target. Our policy would think target p+1 and move right, causing misalignment! Important! Let's analyze.
+
+The ball is caught if either old ball_x == pos or new_x == pos. Our prediction target = x + t*dx (new_x at bottom) assumes catch via new_x. But if old ball_x == pos at some step before bottom, it will catch earlier (at y=9? Actually catch occurs when new_y==9; old ball_x is position at y=8. If old x=p, it catches even if new_x !=p). So the effective catch x is not necessarily the unreflected target; it can be the old x if paddle is under the ball at y=8. The ball's x at y=8 is x + (8-y)*dx. If paddle is at that x, catch. Our target at y=9 is x + (9-y)*dx. The paddle should be at either old x (y=8) or new x (y=9)? The code checks old ball_x first, then new_x. If paddle is at old x, catch; if at new x, catch. So the set of paddle positions that catch is {x + (8-y)*dx, x + (9-y)*dx} (with reflections? old x may be at wall? But if old x at wall and dx outward, new_x same, both same). Our policy aims for new_x target. If paddle is at old_x, it would move toward new_x and miss the catch opportunity? Example ball y=8,x=4,dx=+1,p=4. Our down prediction: u=4+1=5, target5, p4 => move right. But if it moves right to5, at next step old ball_x=4 !=p5, new_x=5==p5, catch via side, dx flips. It still catches! It moved to new_x. If it had stayed at4, catch via center, dx unchanged. Both catch. So aiming new_x is okay; it catches via side. If target new_x is unreachable but old_x reachable? Maybe. But if p=4, target5 reachable. If p=5, target5 no-op, catch via side? old x4 !=5, new x5==5, catch. If p=4 and sticky no-op, catch via center. Good.
+
+What if target new_x is on other side of wall? Example ball y=8,x=9,dx=+1. Old x=9, new_x=9 (wall reflect). target9. If p=9, no-op catch. If p=8, target9 move right, catch via side? old x9 !=8? new x9==8? no, p8, miss? Wait if p8, ball old x9, new x9, neither equals8, miss. But target9, p8 should move right to9, catch. Good.
+
+If ball y=8,x=0,dx=-1, target0. p1 move left. Good.
+
+Now, if ball y=7,x=4,dx=+1. New target at bottom: u=4+2=6. Old x at y=8:5. If paddle p5, our policy target6, move right to6. At next step ball y8,x5, p6. Next step old x5 !=6, new x6==6 catch. If p5 and no-op, catch via center at old x5? At step from y8 to9, old x5==p5, catch. Both okay. Aiming new_x may cause paddle to be one step ahead, catch via side, flipping dx. This may be desirable.
+
+Thus target new_x is a valid catch position. Good.
+
+But our down prediction with wall reflection uses new_x at y=9. If ball would hit wall before bottom, new_x reflected. Paddle aiming there catches via side or center. Good.
+
+Now, consider if target new_x equals p but old_x also p? no issue.
+
+Now, up follow maintains alignment in terms of x=p at each step. When ball comes down, if x=p at y=8, our down policy may move to new_x (p+dx) and catch via side, flipping dx. This may change pattern. Good.
+
+Now, could aiming new_x cause paddle to move away from old_x and miss if new_x unreachable but old_x reachable? Suppose ball y=8, x=4, dx=+1, p=4, target5 reachable. If p=3, target5 distance2, t=1? From y=8 to bottom 1 step, cannot reach5. Old_x=4 distance1, reachable. Our policy moves right to4, then ball old x4==p4 catch! Wait action right from3 to4, catch via center. Good. It moved toward target and ended at old_x. If p=2, target5 distance3, t=1, old_x4 distance2, unreachable. Move right to3, miss. No policy can catch. Good.
+
+If p=5, target5 no-op, catch via side. If p=6, target5 move left to5, catch. Good.
+
+So aiming new_x works.
+
+Now, need ensure down prediction target for DL with u negative uses abs. Example ball y=8,x=0,dx=-1. u=0-1=-1, target1? Actual: old x0, new_x=-1->0, wall reflect, new_x0. Wait target should 0, not1. Let's check formula u = x - (9-y) = 0 -1 = -1. Reflect f(-1) should 1? But actual from x=0 moving left: next step new_x=-1 -> set 0, dx flips to +1. Since only one step to bottom, ball stays x=0. The triangular wave f(u) with period18 for u=-1 gives 1, but that's for continuous reflection after moving left from x=0? Let's examine. If x=0, dx=-1, after 1 step, x=0 (wall), dx=+1. The x coordinate is 0, not 1. The formula x + t*dx with reflection at walls: starting at 0 moving left, the reflected position after 1 step should be 0, not 1. The triangular wave f(u) with u = x + t*dx and f(u)=u mod18, if m<=9 f=m else 18-m, for u=-1: add 18 =>17, f=1. That's wrong because the reflection at boundary occurs when new_x<0, setting new_x=0, not 1. The standard triangular wave for position with velocity -1 starting at 0: sequence 0,0,1,2,...? Let's simulate: t=0 x=0, dx=-1. t=1: new_x=-1 ->0, dx=+1. t=2: x=1. So sequence 0,0,1,2,... The triangular wave with period 18 but with a double at boundaries? The mapping from u = x + t*dx to position is not simply f(u) for negative u near boundary? Let's derive. For x in [0,9], dx=+1: sequence x, x+1,...,9,9,8,...? At right wall, from 9 moving right: t=1 new_x=10->9, dx=-1, so x stays9. So sequence has double at 9. For dx=-1 at left wall: double at0. The triangular wave f(u) with u=x+t*dx and f(u)=u mod18, if m<=9 f=m else 18-m gives for x=9,dx=+1,t=1: u=10, f=8, but actual x=9. So our reflection formula is wrong for one-step wall bounce! The code reflects by clamping to wall and flipping direction, so the ball stays at wall for one step, not skips to 8. The standard triangular wave without double would be 9,8,7, but code gives 9,9,8,7. Because when new_x>9, set new_x=9, dir flip; it does not move to 8 in same step. Similarly top/bottom vertical: at y=0 moving up, stays0 for one step. This is important.
+
+We need correct target computation for wall reflections with clamping (double at boundaries). The ball moves diagonally; when it would cross wall, it stays at wall for that step and direction flips. So horizontal position sequence for dx=+1 starting x: x, x+1, ...,9,9,8,7,... For dx=-1: x,x-1,...,0,0,1,2,...
+Thus the mapping from t to x is not simple triangular wave period 18? It is period 20? Let's see sequence for dx=+1 from 0: 0,1,2,3,4,5,6,7,8,9,9,8,7,6,5,4,3,2,1,0,0,1,... Period 20? From 0 to 0: 0->1 (1), ... 0->9 (9), 9->9 (10), 9->8 (11), ... 9->0 (19), 0->0 (20), 0->1 (21). Yes period 20 with double endpoints. For dx=-1 from 0: 0,0,1,2,...,9,9,8,... period20. So period 20, not 18. Our previous target formulas using 18 are wrong. Need fix.
+
+This is critical. Let's derive correct target with clamping.
+
+Horizontal motion with speed 1, reflecting by staying at boundary. Equivalent to position = clamp? We can model using "unfolded" coordinate with period 20? Sequence for dx=+1 starting x:
+For t=0..9-x: x+t (up to9)
+t=9-x+1: 9 (double)
+then decreasing: 9 - (t - (9-x+1)) until 0
+t=19-x? Let's find period 20.
+We can use a function: Let u = x + t*dx. For dx=+1, u = x+t. The position is:
+If u <=9: u
+If u ==10: 9
+If 11 <= u <=19: 18 - u? Check x=0,t=10 u=10 pos9; t=11 u=11 pos8 (18-11=7? wrong). Let's list x=0 dx+1:
+t:0 u0 pos0
+1 u1 pos1
+2 u2 pos2
+3 u3 pos3
+4 u4 pos4
+5 u5 pos5
+6 u6 pos6
+7 u7 pos7
+8 u8 pos8
+9 u9 pos9
+10 u10 pos9
+11 u11 pos8
+12 u12 pos7
+13 u13 pos6
+14 u14 pos5
+15 u15 pos4
+16 u16 pos3
+17 u17 pos2
+18 u18 pos1
+19 u19 pos0
+20 u20 pos0
+21 u21 pos1
+So for u 0..9 pos=u; u=10 pos9; u=11..19 pos=20-u? 20-11=9? no. Let's find formula: For u 10..19, pos = 19 - u? u10->9, u11->8, ..., u19->0. Yes pos=19-u. For u=20 pos0, u=21 pos1. Period 20: m = u mod20. If m<=9 pos=m; if m==10 pos=9; if 11<=m<=19 pos=19-m; if m==20? m=0 pos0. Actually m=0 pos0. So pos = m for 0<=m<=9; pos=19-m for 10<=m<=19. Check m=10 ->9, m=19->0. Good. Period 20.
+For dx=-1, u = x - t. Starting x=0: t0 u0 pos0; t1 u-1 pos0; t2 u-2 pos1; t3 u-3 pos2; ... t9 u-9 pos9; t10 u-10 pos9; t11 u-11 pos8; ... t19 u-19 pos0; t20 u-20 pos0. Let m = u mod20 (0..19). For u=-1 m19 pos0; u=-2 m18 pos1; ... u=-9 m11 pos9; u=-10 m10 pos9; u=-11 m9 pos8? Wait list: x=0 dx-1:
+t0 u0 m0 pos0
+t1 u-1 m19 pos0
+t2 u-2 m18 pos1
+t3 u-3 m17 pos2
+t4 u-4 m16 pos3
+t5 u-5 m15 pos4
+t6 u-6 m14 pos5
+t7 u-7 m13 pos6
+t8 u-8 m12 pos7
+t9 u-9 m11 pos8? But earlier I thought pos9 at t9? Let's simulate: x=0, dx=-1. t1: new_x=-1->0, dx=+1, pos0. t2: x=1. t3:2, t4:3, t5:4, t6:5, t7:6, t8:7, t9:8, t10:9, t11:9, t12:8... So pos at t9=8, t10=9. My u mapping: t9 u=-9 m11, formula? Need pos=8. t10 u=-10 m10 pos9. So for m 11..19, pos = m-11? m11->0? no. Let's derive general formula for dx=-1 using symmetry. It should be same as dx=+1 starting from x? The sequence depends on dx. We can use a unified formula with "phase" maybe.
+
+Let's define horizontal state as (x, dx). The unfolded coordinate s could be such that position = g(s) and s increments by +1 each step regardless of dx? For dx=+1, s = x + t. For dx=-1, maybe s = 9 - x + t? Let's find a coordinate that always increases by 1 and maps to position with double endpoints.
+Consider a "phase" p in [0,19] representing position along a cycle: 0,1,2,...,9,9,8,...,0,0? Actually cycle length 20: indices 0..19 positions: 0,1,2,3,4,5,6,7,8,9,9,8,7,6,5,4,3,2,1,0. If dx=+1, phase increases by 1. If dx=-1, phase decreases by 1? But we can define phase such that for dx=+1, phase = x if x<=9? For x=9, there are two phases 9 and10. Need know which side. Direction disambiguates: if dx=+1 and x=9, phase=9 (before double) or 10? At x=9 moving right, next step stays9, so phase should be9? Then next phase10 pos9. If dx=-1 and x=9, next step8, phase should be10? Let's define phase q:
+- If dx=+1: q = x for x=0..9? At x=9, q=9.
+- If dx=-1: q = 19 - x? Check x=0 dx=-1: q=19, next q=0 pos0; x=9 dx=-1: q=10, next q=9 pos8? Wait q=10 pos9, next q=9 pos8, good. For x=4 dx=-1: q=15, pos? cycle pos at15=4, next q14 pos5? But dx=-1 from4 should next3, not5. So wrong.
+Maybe q = x for dx=+1, q = 18 - x for dx=-1? Check x=4 dx=-1: q=14, cycle pos14=5? no.
+Let's list cycle positions m: 0:0,1:1,2:2,3:3,4:4,5:5,6:6,7:7,8:8,9:9,10:9,11:8,12:7,13:6,14:5,15:4,16:3,17:2,18:1,19:0.
+For a given x and dx, there are one or two phases:
+- x=0: phases 0 (dx=+1? next1) and 19 (dx=-1? next0) and also? At x=0 moving left, next0, phase19 -> next0. At x=0 moving right, phase0 -> next1.
+- x=9: phases 9 (dx=+1? next9) and 10 (dx=-1? next8).
+- x=4: phases 4 (dx=+1 next5) and 15 (dx=-1 next3). So for dx=+1, phase=x. For dx=-1, phase=19-x? x=4 ->15, yes. x=0 ->19, x=9 ->10. Good. I mistakenly checked pos at phase15=4, next phase14 pos5? Wait if phase decreases? For dx=-1, phase should decrease by 1 each step? Starting x=4 dx=-1, phase15. Next step x=3. Phase should be16? Because phase16 pos3. So phase increases by 1, not decreases. Cycle positions: phase15 pos4, phase16 pos3, phase17 pos2. So for dx=-1, phase = 19 - x, and phase increases by 1 each step. Check x=0 dx=-1 phase19, next phase0 pos0, good. x=9 dx=-1 phase10, next phase11 pos8, good. Thus in both cases, phase q increases by 1 each step, where q = x if dx=+1, q = 19 - x if dx=-1. Position = cycle[q mod20]. Great.
+
+So target after t steps: q0 = x if dx=+1 else 19 - x. q = q0 + t. target = cycle[q mod20], where cycle m: if m<=9: m; else: 19-m. (m 10..19). This handles double endpoints.
+
+Our previous formulas using period18 are wrong. Need redesign h1 conditions for down target with period20.
+
+Down t = 9 - y.
+For DR (dx=+1): q = x + t = x + 9 - y. Range x0..9,y0..9 => 0..18. (Not 20, but okay). target = cycle[q]: if q<=9 target=q; if q>=10 target=19-q. (q=10 target9, q=18 target1). Good. Our previous segment2 used 18-u, should be 19-u. Need adjust constants.
+For DL (dx=-1): q = 19 - x + t = 19 - x + 9 - y = 28 - x - y. Range x+y 0..18 => q 10..28. Mod20. Could also use q' = q -20 = 8 - x - y (range -10..8). target = cycle[q mod20]. Maybe easier use q = 28 - x - y. Range 10..28. Segments: q 10..19 target=19-q; q 20..28 => m=q-20 0..8 target=m=q-20. Two segments. Or use q' = 8 - x - y (range -10..8). If q' in 0..8 target=q'; if q' in -10..-1 target? q = q'+20, m=q' (negative mod20 = 20+q'), target=19-(20+q') = -1 - q'? For q'=-1 (q19) target0; -1 -(-1)=0. q'=-10 (q10) target9; -1+10=9. So target = -1 - q' for q'<0. This is similar abs but offset. Maybe use q = 28 - x - y with segments q<=19 and q>=20.
+
+Let's update h1 conditions for down directions with correct cycle.
+
+DR: q = x + 9 - y (0..18).
+Segment A: q <=9. Indicator: 9.5 - q >0 => -x + y +0.5 >0 (same as before).
+Segment B: q >=10. Indicator: q -9.5 >0 => x - y -0.5 >0 (same).
+Sign segment A: target=q. Right if q-p>0: x+9-y-p-0.5 => var x-y-p, threshold -8.5 (same). Left if p-q>0: var -x+y+p, threshold 9.5 (same).
+Segment B: target=19-q. Right if 19-q-p>0 => 19 - (x+9-y) - p -0.5 = 9.5 - x + y - p. var -x+y-p, threshold -9.5? Wait z=G*(var - threshold). Want var +9.5. Set threshold=-9.5. Previously -8.5. Left if q+p-19>0 => x+9-y+p-19-0.5 = x - y + p -10.5. var x-y+p, threshold 10.5. Previously 9.5.
+Check q=10,p9 target9 equal: right 19-10-9=0 false; left 10+9-19=0 false. Conditions: right var -x+y-p+9.5. For x? q=10 => x-y=1. p9: -1-9+9.5=-0.5 false. left var x-y+p-10.5=1+9-10.5=-0.5 false. Good.
+q=10,p8 target9>8: right -1-8+9.5=0.5 true. left 1+8-10.5=-1.5 false.
+q=18,p1 target1 equal: right -? q=18 => x-y=9. p1: -9-1+9.5=-0.5 false; left 9+1-10.5=-0.5 false.
+q=18,p0 target1>0: right -9-0+9.5=0.5 true.
+
+DL: dx=-1, t=9-y. q = 19 - x + 9 - y = 28 - x - y. Range 10..28.
+Segment A: q <=19 (i.e., 28 - x - y <=19 => x+y >=9). target=19-q = 19 - (28 - x - y) = x + y -9. This is nonnegative 0..9.
+Segment B: q >=20 (x+y <=8). m=q-20 = 8 - x - y. target = m = 8 - x - y (0..8). Note q=28 (x+y=0) target8? Simulate x=0,y=9? But y=9 terminal? For down y<=8. x=0,y=8, t=1, dx=-1: ball at0 moving left, next stays0, target0. q=28-0-8=20, target0. Formula B 8-0-8=0. Good. x=0,y=0, t=9, dx=-1: sequence 0,0,1,2,3,4,5,6,7,8? target8. q=28, m8 target8. Good.
+Segment A indicator: q <=19 => x+y >=9. Use x+y -8.5 >0 (same as DL_G before).
+Segment B indicator: q >=20 => x+y <=8. Use -x-y +8.5 >0 (same as DL_H before).
+Sign segment A: target = x+y-9. Right if target-p>0 => x+y-p-9-0.5 = x+y-p-9.5. var x+y-p, threshold 9.5 (same as DL_I before). Left if p-target>0 => p -x -y +9 -0.5 = -x-y+p+8.5. var -x-y+p, threshold -8.5 (same as DL_J).
+Sign segment B: target = 8 - x - y. Right if 8 - x - y - p >0 => -x-y-p+8-0.5 = -x-y-p+7.5. var -x-y-p, threshold -7.5. Previously -8.5. Left if x+y+p-8>0 => x+y+p-8-0.5 = x+y+p-8.5. var x+y+p, threshold 8.5. Previously 9.5.
+Check x=0,y=8,p0 target0 equal: B true, right -0-8-0+7.5=-0.5 false, left 0+8+0-8.5=-0.5 false.
+x=0,y=8,p1 target0<1: left 0+8+1-8.5=0.5 true.
+x=0,y=0,p8 target8 equal: B true, right -0-0-8+7.5=-0.5 false, left 0+0+8-8.5=-0.5 false.
+x=0,y=0,p7 target8>7: right -7+7.5=0.5 true.
+
+Good. Need update DR_E/F and DL_K/L thresholds.
+
+Now, what about up follow? It doesn't use target, so unaffected. But down prediction after wall/brick uses correct target.
+
+Need also consider vertical top bounce double at y=0. Up follow doesn't predict. Down prediction when ball moving down from y=0? If ball at y=0 moving down, t=9. Horizontal target with period20 correct. If ball at y=0 moving up ambiguous, no-op, then down. Good.
+
+Now, need revisit initial target with correct formula. Start (3,0) dx+1, t=6, q=0+6=6 target6. Same. Start (3,9) dx-1, q=19-9+6=16? Wait x=9,y=3,t=6, q=19-9+6=16, target=19-16=3. Same. Good.
+
+Now, need update h1 unit definitions:
+DR_E threshold -9.5 (var -x+y-p)
+DR_F threshold 10.5 (var x-y+p)
+DL_K threshold -7.5 (var -x-y-p)
+DL_L threshold 8.5 (var x+y+p)
+Others same.
+
+Let's re-evaluate DL segment A target for x+y=9: target0. Example x=9,y=0? down t=9, dx=-1 from9: sequence 9,8,7,6,5,4,3,2,1,0 target0. q=28-9=19 target0. Good. x=0,y=9 (not down) target0. Good.
+Segment B x+y=8: target0. Example x=8,y=0,t=9, dx=-1 from8: 8,7,6,5,4,3,2,1,0,0 target0. q=20 target0. Good.
+
+Now, need consider if q can be 28 and target8, as above. Good.
+
+Now, h1 DR_B q>=10 true for q=10..18. target=19-q gives 9..1. q=18 target1. There is no q=19 for DR because max18. Good.
+DL q range10..28. Segment A q<=19 (x+y>=9) target0..9. Segment B q>=20 (x+y<=8) target0..8. Good.
+
+Now, output logic unchanged.
+
+Need think about up follow with wall double: If ball moving up and hits wall, dx flips, but phase? Following dx before flip maintains alignment? Example ball x=0, dx=-1, p=0, up. Action left no-op, ball stays0, dx flips +1. Aligned. Next up-right, action right, ball x1, p1. Good. If ball x=1, dx=-1, p=1, action left to0, ball x0, aligned. Good.
+
+Now, down prediction with correct wall double should align.
+
+Let's test a down-right wall scenario: ball y=5,x=9, dx=+1 (at wall? If x=9 and dx=+1, it will stay9 next). q=x+9-y=9+4=13, target=19-13=6. Paddle should move to6. If p6, no-op. Next step ball x9,y6, dx flips -1? Actually from x9 dx+1, new_x10->9, dx=-1. Direction ambiguous? trail x9, ball x9, dy=1. Our direction false, no-op. Next step ball x8,y7, dx=-1, direction DL. q=19-8+9-7? t=2, q=19-8+2=13, target6. Paddle p6, catch. Good.
+
+Down-left wall: ball y=5,x=0,dx=-1. q=19-0+4=23, m3? target3. Paddle to3. Next wall stay0, dx+1, ambiguous, next x1,y6, DR q=1+3=4 target4? Wait actual sequence: y5 x0 dx-1. Step1 y6 x0 (wall), dx+1. Step2 y7 x1. Step3 y8 x2. Step4 y9 x3. Target3. At y6 x0, q=0+3=3 target3. At y7 x1, q=1+2=3 target3. Good. Our DL at y5 target3. Good.
+
+Now, need update code thresholds accordingly.
+
+Let's list final h1 units with G=20:
+0 DR_dir: bx1,by1,tx-1,ty-1, threshold1.5
+1 DL_dir: bx-1,by1,tx1,ty-1, threshold1.5
+2 UR_dir: bx1,by-1,tx-1,ty1, threshold1.5
+3 UL_dir: bx-1,by-1,tx1,ty1, threshold1.5
+4 DR_A: bx-1,by1, threshold -0.5
+5 DR_B: bx1,by-1, threshold 0.5
+6 DR_C: bx1,by-1,px-1, threshold -8.5
+7 DR_D: bx-1,by1,px1, threshold 9.5
+8 DR_E: bx-1,by1,px-1, threshold -9.5
+9 DR_F: bx1,by-1,px1, threshold 10.5
+10 DL_G: bx1,by1, threshold 8.5
+11 DL_H: bx-1,by-1, threshold -8.5
+12 DL_I: bx1,by1,px-1, threshold 9.5
+13 DL_J: bx-1,by-1,px1, threshold -8.5
+14 DL_K: bx-1,by-1,px-1, threshold -7.5
+15 DL_L: bx1,by1,px1, threshold 8.5
+
+Check DR_E: var -x+y-p, threshold -9.5 => z=20*(-x+y-p+9.5). For q=10,p8: x-y=1, -1-8+9.5=0.5 true. Good.
+DR_F: var x-y+p, threshold10.5 => x-y+p-10.5. q=10,p10? p max9. q=10,p9 equal: 1+9-10.5=-0.5 false. q=10,p8 left? target9>8, left false: 1+8-10.5=-1.5. q=18,p2 target1<2: x-y=9, 9+2-10.5=0.5 true. Good.
+DL_K: var -x-y-p, threshold -7.5 => -x-y-p+7.5. Segment B x+y<=8. target=8-x-y. Right if target>p => 8-x-y-p>0 => -x-y-p+8>0; margin 7.5. Good.
+DL_L: var x+y+p, threshold8.5 => x+y+p-8.5. Left if target<p => 8-x-y-p<0 => x+y+p>8; margin8.5. Good.
+
+Now, need consider if ball y=9? t=0. Down direction maybe terminal? If ball at y=9 and not terminal? It would be terminal if not caught. But maybe observation after catch has ball y=7/8. Not issue. If y=9, DR q=x, target x. Paddle should be x. Conditions: A q<=9 true, C x-p>0. Good.
+
+Now, up follow: We use UR_dir/UL_dir based on dy=-1. If ball moving up and dx=+1, right. If dx=-1, left. What if ball moving up and dx=0 (wall vertical? Actually wall bounce dx=0,dy=-1 at top? At top, dx may ±1, dy=0. At wall, dx=0,dy=-1). If dx=0,dy=-1, direction units false, no-op. Could be one step at wall while moving up. If aligned, okay. If not, maybe. Could treat dx=0,dy=-1 as up with dx determined by wall? Not necessary.
+
+Now, need maybe add h1 units for "ball_x" and "paddle_x" analog? Not needed.
+
+Now, let's think about the IR's tanh activation. h1 units with threshold and gain produce tanh. h2 AND uses h1 values. Good.
+
+Now, potential issue: The input is 600 numbers each 0 or 1, but channels may have multiple 1s? Ball and trail can be same, so channel3 and4 both 1 at same cell. Our linear forms use both, okay. Paddle and ball could be same at row9? If terminal, no. If ball at row9 and paddle same, act would have caught before terminal? The observation after act not terminal? If ball reaches bottom and caught, new_y=last_y (7/8), so not row9. If not caught, terminal. So no.
+
+Now, need maybe account for sticky actions by choosing no-op when target difference 0. We do.
+
+Now, let's consider if output no-op bias 0 and false -10, but other actions -20. Softmax probabilities: false action e-10 ~4.5e-5, noop1. When no move, no-op prob ~0.9999. Good. When up true, right10, left-10, noop0: prob right e10/(e10+1+e-10) ~0.99995. Good.
+
+Now, could h2 false units not exactly -1 but -0.999999, false logit -9.9999, fine.
+
+Now, need maybe set h2 AND gain G2=20 for more saturation. If h1 true 0.999999, all true pre=20*(3-2.5)=10, tanh1. Two true one false pre=20*(1-2.5)=-30. Good. Use G2=20. Output S=10. Fine.
+
+Now, code details:
+- In make_weights, if coefficient zero, skip. But for ball_y by*r, r=0 gives 0, skip. Good.
+- We add both ball and trail weights to same dict; if an input index appears in both? Ball channel and trail channel different, so no. Paddle channel different.
+- For paddle_x, only row9. If px negative, add negative.
+
+Potential optimization: make_weights called 16 times, loops 100, fine.
+
+Now, need ensure names not duplicate. Use unique.
+
+Now, final answer should include design brief. Mention strategy: when ball moving down, aim paddle at predicted bottom x using correct wall-clamping reflection; when moving up, follow ball's horizontal direction to maintain alignment. Hidden units: direction detectors, segment/sign detectors for down-right/down-left, h2 AND gates, output scoring.
+
+Now, let's consider if we should include an edits block as well. The final instruction says return one complete Python code block. I will output design text and one Python code block. If they strictly wanted edits, maybe not. But the IR instruction is explicit. Could we name the code block ```python and inside define build_policy. Good.
+
+Now, let's double-check the compile of output rules: set_output_action for action 0 with empty h2_terms and bias 0. It will set b3[0]=0. For action 1, h2_terms weights S, bias40. For action 2, empty bias -20. For action3, terms bias40. For action4, empty -20. For action5, empty -20. Good.
+
+Now, one subtle bug: In compile, for output rules, it does:
+for rule in prog.output_rules:
+    act_idx = int(rule["action_idx"])
+    for h2_name, w in rule["h2_terms"].items():
+        W3[h2_name_to_idx[h2_name], act_idx] += float(w)
+    if "bias" in rule:
+        b3[act_idx] = float(rule["bias"])
+If we call set_output_action for action 1 and 3, W3 columns set. For action 0,2,4,5 empty, only bias. Good.
+
+Now, h2 pass units: add_h2_gate("UR_pass", {"UR_dir": 10.0}, bias=0.0). If UR_dir h1 is +1, h2=tanh(10)=1; if -1, -1. Good. But if UR_dir h1 is 0 (ambiguous), h2=0. Then output right sum includes 0 instead of -1. Could affect no-op states. For ambiguous direction, UR_dir pre = 20*(score-1.5). If score=1 (dx=1,dy=0), pre=-10, h1=-0.9999999959, not 0. If score=0, pre=-30, -1. If score? Could score be 1.5? No integer. So h1 near -1. Good.
+
+h1 direction units for ambiguous reset score=0 => -1. Good.
+
+Now, h1 condition units in ambiguous states may be true/false, but h2 AND with dir false => false. Good.
+
+Now, let's think about if ball and trail same at reset: dx=0,dy=0. Direction scores 0. h1 dir -1. Down h2 false. Up pass -1. Noop. Good.
+
+Now, potential issue: The trail channel is the ball's previous cell. At reset, last_x=ball_x,last_y=ball_y, so trail same. After first act, trail is previous. Good.
+
+Now, let's consider if ball hits a brick: new_y=last_y, so trail and ball have same y but x differs by dx. Direction dy=0,dx=±1. Our direction units false (score=1). No-op. But the ball is now moving down. We lose one step. Could we treat dy=0,dx=±1 as down to improve? Maybe we can adjust direction units with additional logic without too many units? Let's see if worth.
+
+We have 16 h1 used, 16 spare. We could create effective direction units that treat dy=0,dx=±1 as down, and dx=0,dy=±1 as up/down with wall dx. But implementing exactly may require more units. Maybe we can modify existing direction units to use thresholds that include dy=0 as down, while avoiding both DR/DL true for dx=0,dy=1.
+
+We can create new h1 units for "DR_eff" and "DL_eff" using h2? h1 can compute linear conditions. We have spare h1. But h2 AND units currently reference DR_dir/DL_dir. We could replace with effective direction h1 units. Need design.
+
+Effective direction after vertical bounce (dy=0,dx=±1) should be down with same dx. So DR_eff true if dx=1 and dy>=0 (dy=1 or0), but not if dx=0,dy=1. DL_eff true if dx=-1 and dy>=0.
+Can we implement DR_eff with a single linear threshold? Conditions in (dx,dy): (1,1),(1,0). This is a rectangle, not a halfspace? In 2D, set {dx=1, dy>=0}. Since dx,dy are discrete -1,0,1. A linear function a*dx + b*dy + c >0 can select these? Let's try. Need values:
+(1,1): >0
+(1,0): >0
+(1,-1): <0
+(0,1): <0 (to avoid wall down)
+(0,0): <0
+(-1,1): <0
+(-1,0): <0
+(-1,-1): <0
+Can we find a,b,c? Inequalities:
+a+b+c>0
+a+c>0
+a-b+c<0
+b+c<0
+c<0
+-a+b+c<0
+-a+c<0
+-a-b+c<0
+From a+c>0 and -a+c<0 => c > -a and c < a => a>0 and c between. From b+c<0 and a+b+c>0 => a > -b. From a-b+c<0 => a+c < b. But a+c>0, so b>0. From -a+b+c<0 => b+c < a. Possible? Choose a=2,c=-0.5 => a+c=1.5>0, -a+c=-2.5<0. Need b+c<0 => b<0.5. Need a+b+c>0 => 1.5+b>0 => b>-1.5. Need a-b+c<0 =>1.5-b<0 => b>1.5. Contradiction. So not linearly separable. Need h2 AND of dx=1 and dy>=0. We have h1 for dx=1? Could create dx_right indicator (dx=1) and dy_nonneg indicator (dy>=0). Then h2 AND. But our h2 conjunctions already use direction. We could create effective direction h2 units? h2 can AND h1 dx_right and dy_nonneg. But h2 units are used for conjunctions; we could make DR_eff an h2 unit, but h2 conjunctions cannot take h2 as input. We would need h1 effective direction or restructure: h2 conjunctions could AND dx_right, dy_nonneg, segment, sign (4-way) directly. h2 can AND four h1 indicators with bias -3.5*G. That might work! We can replace DR_dir h1 with h1 dx_right and dy_down_or_zero, and h2 AND 4 terms. But we need h1 units for dx_right, dy_down_or_zero, etc. Let's explore.
+
+Current h1 direction units are 4. We could instead have h1 indicators:
+- dx_right: dx=1. Linear? dx = x - trail_x. Need true if dx=1, false if 0 or -1. Use dx -0.5 >0. var ball_x - trail_x, threshold0.5.
+- dx_left: dx=-1. Use -dx -0.5 >0. var -ball_x + trail_x, threshold0.5.
+- dy_down: dy=1. Use dy -0.5 >0. var ball_y - trail_y, threshold0.5.
+- dy_up: dy=-1. Use -dy -0.5 >0. var -ball_y + trail_y, threshold0.5.
+- dy_nonneg: dy>=0 (dy=1 or0). Use dy +0.5 >0. var ball_y - trail_y, threshold -0.5.
+- dy_nonpos: dy<=0 (dy=-1 or0). Use -dy +0.5 >0. var -ball_y + trail_y, threshold -0.5.
+Then effective directions:
+DR_eff = dx_right AND dy_nonneg (dy=1 or0). But this includes dx=1,dy=0 (vertical bounce) and dx=1,dy=1. It excludes dx=1,dy=-1. Good. It also includes dx=1,dy=0 at top/brick, treat down. Good.
+DL_eff = dx_left AND dy_nonneg.
+UR_eff = dx_right AND dy_nonpos (dy=-1 or0). But dy=0,dx=1 would be both DR_eff and UR_eff true! We want treat dy=0 as down, not up. So UR should be dx_right AND dy_up (dy=-1) only. UL = dx_left AND dy_up.
+Thus we need h1: dx_right, dx_left, dy_up, dy_nonneg. 4 units, same count as direction units. Then h2 conjunctions for down need AND 4 terms: dx_right, dy_nonneg, segment, sign. Up pass can be h2 AND dx_right, dy_up (2 terms) or h1? We can create h2 up pass as AND of dx_right and dy_up. But output needs h2 up pass; can be h2 unit. Good.
+
+This would handle vertical bounce (dy=0) as down, improving one-step delay. What about wall bounce dx=0,dy=1? dx_right/left false, so no direction. Still one-step delay at wall. Could handle dx=0 with wall position, but maybe less important. Vertical bounces (bricks/top) more frequent? Bricks every up cycle. Handling dy=0 as down helps after brick bounce: at bounce state dy=0,dx=±1, policy will immediately use down prediction instead of no-op. Good.
+
+Let's adopt this improved direction representation. Need adjust h1 units and h2 conjunctions.
+
+New h1 units:
+0 dx_right: var ball_x - trail_x, threshold 0.5. (dx=1)
+1 dx_left: var -ball_x + trail_x, threshold 0.5. (dx=-1)
+2 dy_up: var -ball_y + trail_y, threshold 0.5. (dy=-1)
+3 dy_nonneg: var ball_y - trail_y, threshold -0.5. (dy>=0: dy=1 or0)
+Maybe also dy_down? Not needed. dy_nonneg true for dy=1,0; false for dy=-1. For reset dy=0 true, but dx false, so no direction.
+4 DR_A ... as before (6)
+10 DL_G ... (6)
+Total h1 =4+6+6=16. Same.
+
+h2 units:
+Down-right conjunctions now AND(dx_right, dy_nonneg, segment, sign) => 4-way AND.
+DR_r1 = AND(dx_right, dy_nonneg, DR_A, DR_C)
+DR_r2 = AND(dx_right, dy_nonneg, DR_B, DR_E)
+DR_l1 = AND(dx_right, dy_nonneg, DR_A, DR_D)
+DR_l2 = AND(dx_right, dy_nonneg, DR_B, DR_F)
+Down-left:
+DL_r1 = AND(dx_left, dy_nonneg, DL_G, DL_I)
+DL_r2 = AND(dx_left, dy_nonneg, DL_H, DL_K)
+DL_l1 = AND(dx_left, dy_nonneg, DL_G, DL_J)
+DL_l2 = AND(dx_left, dy_nonneg, DL_H, DL_L)
+Up pass:
+UR_pass = AND(dx_right, dy_up)  # 2-way
+UL_pass = AND(dx_left, dy_up)
+Need h2 AND helper for variable number of terms. For k terms, bias = -(k-0.5)*G2? For k=4, all +1 sum4, want positive: 4 - 3.5 =0.5. If three true one false: 3-1=2? Wait false -1. Sum = 3*1 + (-1)=2. 2 -3.5 = -1.5. Good. For k=2, bias -1.5: both +1 sum2 =>0.5; one true one false sum0 => -1.5. Good. So add_and(name, terms, k): bias=-(k-0.5)*G2.
+
+Now, output false contributions change? h2 conjunctions false -1. Up pass false -1. Same. But in down state, dy_nonneg true, dx_right true, dx_left false, dy_up false. Up pass UR = dx_right & dy_up => false (-1), UL false. Down right units: one true maybe, others false. Same sums. In vertical bounce state dy=0,dx=1, dy_nonneg true, dy_up false, so down prediction active, up pass false. Good. In reset dx=0, dy=0: dx_right/left false, dy_nonneg true, dy_up false. Down h2 false because dx false. Up pass false. Noop.
+
+In wall bounce state dx=0,dy=1: dx false, dy_nonneg true, no direction. Noop. Could maybe handle later.
+
+Now, h1 dx_right/dx_left/dy_up/dy_nonneg margins:
+dx_right: dx=1 => var1, threshold0.5 =>0.5; dx=0 => -0.5; dx=-1 => -1.5. Good.
+dx_left similar.
+dy_up: dy=-1 => var1? var = -ball_y + trail_y = -dy. If dy=-1, var=1, threshold0.5 =>0.5. dy=0 => -0.5; dy=1 => -1.5.
+dy_nonneg: var=dy, threshold -0.5. dy=1 =>1.5; dy=0=>0.5; dy=-1=>-0.5. Good.
+
+Now, h2 4-way AND with G2=20: all true pre=20*(4-3.5)=10; three true one false pre=20*(2-3.5)=-30. Good.
+
+Now, output S=10,b=40 still works. h2 false -1.
+
+Need update code h1 names and h2 terms.
+
+Let's list final h1 with new names:
+0 dx_right: bx=1, tx=-1, threshold0.5
+1 dx_left: bx=-1, tx=1, threshold0.5
+2 dy_up: by=-1, ty=1, threshold0.5
+3 dy_nonneg: by=1, ty=-1, threshold -0.5
+4 DR_A: bx=-1,by=1, threshold -0.5
+5 DR_B: bx=1,by=-1, threshold 0.5
+6 DR_C: bx=1,by=-1,px=-1, threshold -8.5
+7 DR_D: bx=-1,by=1,px=1, threshold 9.5
+8 DR_E: bx=-1,by=1,px=-1, threshold -9.5
+9 DR_F: bx=1,by=-1,px=1, threshold 10.5
+10 DL_G: bx=1,by=1, threshold 8.5
+11 DL_H: bx=-1,by=-1, threshold -8.5
+12 DL_I: bx=1,by=1,px=-1, threshold 9.5
+13 DL_J: bx=-1,by=-1,px=1, threshold -8.5
+14 DL_K: bx=-1,by=-1,px=-1, threshold -7.5
+15 DL_L: bx=1,by=1,px=1, threshold 8.5
+
+Check dy_nonneg and DR_A both use by=1,ty=-1 vs by=1,tx? Different.
+
+h2:
+add_and("DR_r1", ["dx_right","dy_nonneg","DR_A","DR_C"])
+...
+add_and("UR_pass", ["dx_right","dy_up"])
+add_and("UL_pass", ["dx_left","dy_up"])
+
+Now, output terms same.
+
+This improved policy uses down prediction immediately after vertical bounce. Good.
+
+Can we also handle wall bounce dx=0,dy=±1 with spare h1? We have 16 h1 used, 16 spare. Could add wall direction effective:
+- If dx=0, dy=1 (down after wall), determine dx by ball_x: if x=0 => dx_right, if x=9 => dx_left. If x not 0/9, dx=0,dy=1 shouldn't happen except maybe? Could be after wall only at x=0/9. We can create h1 units:
+wall_down_right: dx=0, dy=1, x=0. But dx=0 is not a single halfspace? dx=0 means ball_x == trail_x. In one-hot, equality can be detected by sum? We can create h1 indicator for dx_zero: maybe 1 - |dx|? Not linear threshold? dx values -1,0,1. We can detect dx_zero by two conditions? dx_right false and dx_left false. h2 can AND NOT dx_right and NOT dx_left. But h1 can't. We have h2 spare. Could create h2 wall_down_right = AND(dy_down, NOT dx_right, NOT dx_left, x_zero). Need x_zero indicator h1 (ball_x=0). Similarly x_nine. But h2 conjunctions for down would need use effective dx_right_eff = dx_right OR wall_down_right. h2 cannot OR h2. Could create h1 effective dx_right_eff? Maybe linear? dx_right_eff true if dx=1 OR (dx=0,dy=1,x=0). Not linear. Could restructure output to include wall cases as separate conjunctions. Too complex. Wall bounce one step maybe okay.
+
+But we can handle dx=0,dy=1 by treating as down with dx determined by x using additional h2 conjunctions for down target? For wall at x=0, dx should be +1; at x=9, dx=-1. We could add h2 units for "wall_right_down" and "wall_left_down" that are true in those states, and output move toward target? But target depends on x,y. At wall bounce state, x=0 or9, dy=1, dx=0. The next horizontal direction is known. We could simply move in that direction (right if x=0, left if x=9) for one step, similar to up follow. This may maintain alignment. Add h2 units:
+wall_right = AND(dy_down, x_zero, NOT dx_right, NOT dx_left?) But if dx=0,dy=1 at x=0, dx_right/left false. We can use dy_down indicator (dy=1) and x_zero. If dx_right true and x=0? Could happen? Ball at x=0 moving right, dx=1,dy=1. dy_down true, x_zero true, but we don't want wall_right? It would also be true, but down prediction already active. If wall_right contributes right, okay maybe. But if dx_right true, moving right, right action okay. If dx_left true at x=0? impossible (would be wall bounce next). So maybe wall_right = AND(dy_down, x_zero) is enough; it will be true for normal down-right at x=0 too, but right action is consistent. For down prediction at x=0, target may be right, so okay. wall_left = AND(dy_down, x_nine). This could add right/left bias when ball at wall moving down, helping one-step delay. But it may also add right when ball at x=0 moving down-left? dx_left,dy=1 at x=0? That state is after wall bounce? Actually if dx_left,dy=1 at x=0, it will stay0 and flip right; wall_right true, good. If dx_right,dy=1 at x=0, moving right, wall_right true, good. If dx=0,dy=1 at x=0, good. So wall_right can just be dy_down & x_zero. Similarly wall_left dy_down & x_nine. But if ball at x=0 moving down and target is left? Can target be left? At x=0, dx could be -1 (wall bounce) or +1. Target after t steps is >=0, likely right or same. Moving right is safe. At x=9, moving left safe. This could improve wall bounce.
+
+Need h1 indicators: dy_down (dy=1) and x_zero, x_nine. We have spare h1. dy_down: var ball_y - trail_y, threshold0.5. x_zero: ball at column0. We can create h1 threshold with weight 1 on ball channel col0 all rows, threshold0.5. x_nine: weight 1 on col9, threshold0.5. Then h2 wall_right = AND(dy_down, x_zero) (2-way), wall_left = AND(dy_down, x_nine). Add to output right/left with weight S? But if down prediction already true, adding wall_right may make right logit higher, okay. If down prediction says left but wall_right true? Could that happen at x=0? Down target from x=0 should not be left (target >=0, p maybe >target? If p>target, left could be true. Example x=0,y=8,dx=-1 (wall bounce), target0, p1 => left true. wall_right true (dy_down,x0) would add right, conflicting. Which is correct? At x=0,dy=1,dx=0 (after wall), actual dx will be +1, target0? If p1, target0, should move left to0, not right. wall_right would push right, bad. But if dx=0,dy=1,x=0, our down prediction is inactive (dx_right/left false), so only wall_right would move right, wrong if p1. Wait actual next dx=+1, but target at bottom from current x=0,y=8 with dx=+1: t=1, target0 (wall double). Paddle p1 should move left to0. So wall_right (move right) is wrong. We need move toward target, not just direction. So simple wall direction not good.
+
+Could create wall down effective dx and use down prediction. Too complex. Skip.
+
+The one-step wall delay may be okay because down prediction before wall positions paddle. At wall bounce state, if paddle already at target, no-op okay. If not, maybe miss. But likely okay.
+
+Now, with dy=0 as down, after brick bounce, down prediction active. At brick bounce state, ball y=4, x maybe p, dx known, dy=0. Down prediction target from y=4 with t=5. If aligned, target=p? Let's check: ball after brick bounce at y=4,x=p, dx same. If dx=+1, q=x+5. If p=4, q9 target9? Wait if ball at y=4,x=4,dx=+1, after brick bounce it will move down-right: y5 x5, y6 x6, y7 x7, y8 x8, y9 x9. Target9, not p4. But if it was aligned before bounce? Let's simulate: ball moving up-right, p follows. Before bounce step: ball y=4,x=3,p=3, dx=+1,dy=up. Action right -> p4. Ball hits brick at x4,y3, bounces to y4,x4, dx=+1,dy=down. Now ball x4,p4. Down prediction target from y4,x4: q=4+5=9, target9. Paddle p4, needs move right5 in 5 steps, catch at9. Good. It will move right. So down prediction active immediately, good. If we had no-op one step, p4, next y5,x5, target9, 4 steps, still catch. Both okay. Active better.
+
+Now, after top bounce (y=0,dy=0,dx=±1), down prediction active. If aligned p=x, target after 9 steps maybe x+9 reflected. Paddle can move. Good.
+
+Now, need update design description: hidden units compute dx/dy indicators, down segment/sign detectors, h2 gates.
+
+Now, let's verify h1 dy_nonneg true for dy=0 and dy=1. For down prediction after vertical bounce, good. For reset dy=0 but dx=0, no direction. For up state dy=-1, dy_nonneg false, so down inactive. Good.
+
+Now, h2 4-way AND bias: For k=4, bias=-(4-0.5)*G2 = -3.5*20=-70. Weights 20 each. All true pre=80-70=10. Three true one false: 60-70=-10? Wait sum h1: three +1, one -1 =2. 20*2=40, bias -70 => -30. Good. Two true two false sum0 => -70. Good.
+For k=2, bias=-1.5*20=-30. Both true sum2*20=40-30=10. One true one false sum0-30=-30. Good.
+
+Now, output S=10,b=40. h2 true 1, false -1. Good.
+
+Now, need ensure h2 unit count: 8 down +2 up =10. h1 16. Good.
+
+Now, let's think about if dy_nonneg and dy_up are mutually exclusive? dy_nonneg true for dy=0,1; dy_up true for dy=-1. Good. dx_right/left mutually exclusive? dx=0 both false. Good.
+
+Now, potential issue: h1 dx_right uses ball_x - trail_x. If ball and trail same x but different y (vertical bounce), dx=0 false. Good. If ball and trail same y but different x (wall bounce), dy=0, dy_nonneg true, dx_right/left true, so down prediction active! Wait wall bounce: ball at x=0, trail x=0? Actually wall bounce horizontal: new_x=0, last_x=0? If ball at x=1 moving left, last_x=1, new_x=0, trail x=1, ball x=0, dx=-1, dy=±1. Not dx=0. The step after wall bounce: ball at x=0, trail x=0? Let's simulate: state after wall bounce: ball x=0, trail x=0? At act from x=1 to0, last_x=1, new_x=0, trail=1, ball=0, dx=-1. Direction not ambiguous. Next act from x=0 to -1->0, last_x=0, new_x=0, trail=0, ball=0, dx=0, dy changes. So wall ambiguity occurs one step after the wall, when ball has already flipped dx. At that state, dx=0,dy=±1. Our dx_right/left false, so no direction. Good.
+
+Vertical bounce (brick/top): state after bounce: ball y=last_y, trail y=last_y? Example brick: before step ball y=4, last_y=5? Wait after bounce, trail is old ball y=4, new_y=4, so trail y=4, ball y=4, dy=0, dx=±1. So dx known, dy_nonneg true, down active. Good.
+
+Top bounce: before step ball y=1, last_y=2? new_y=0, trail y=1, ball y=0, dy=-1? Actually from y=1 up to0, no bounce, dy=-1. Next step from y=0 up to -1->0, last_y=0, new_y=0, trail y=0, ball y=0, dy=0, dx=±1. Down active. Good.
+
+Now, down prediction at top bounce state y=0, dx known, t=9. Good.
+
+Now, need consider if ball at y=0, dx=+1, x=9? It may be at top-right corner. Down prediction target q=9+9=18, target1. Paddle move left. Good.
+
+Now, let's maybe add a small no-op bias? We set noop0. Good.
+
+Now, code final. Need ensure no syntax errors.
+
+Potential issue: In make_weights, for trail_y ty*r, if ty negative, val negative. We add to dict. If val is -0.0? skip if val !=0. Use if val: but -0.0 false. Fine.
+
+Potential issue: Python dict keys int. Good.
+
+Potential issue: The IR's add_h1_threshold expects input_weights dict; if empty? Not. For x_zero not used.
+
+Now, let's write code cleanly.
+
+```
+def build_policy():
+    prog = MLPProgram(input_dim=600, h1_dim=32, h2_dim=32, output_dim=6, activation="tanh")
+    G = 20.0
+    G2 = 20.0
+    S = 10.0
+    def idx(r,c,ch): return (r*10+c)*6+ch
+    def weights(bx=0.0, by=0.0, tx=0.0, ty=0.0, px=0.0):
+        w={}
+        for r in range(10):
+            for c in range(10):
+                v=0.0
+                if bx: v += bx*c
+                if by: v += by*r
+                if v:
+                    i=idx(r,c,3)
+                    w[i]=w.get(i,0.0)+v
+                v=0.0
+                if tx: v += tx*c
+                if ty: v += ty*r
+                if v:
+                    i=idx(r,c,4)
+                    w[i]=w.get(i,0.0)+v
+        if px:
+            for c in range(10):
+                v=px*c
+                if v:
+                    i=idx(9,c,0)
+                    w[i]=w.get(i,0.0)+v
+        return w
+    def add_h1(name, bx,by,tx,ty,px, threshold):
+        prog.add_h1_threshold(name, weights(bx,by,tx,ty,px), threshold, G)
+    ...
+```
+
+For px, c=0 v=0 skip. Good.
+
+Add h1 calls. Need pass floats? ints okay.
+
+h2 helper:
+```
+    def add_and(name, terms):
+        k=len(terms)
+        prog.add_h2_gate(name, {t: G2 for t in terms}, bias=-(k-0.5)*G2)
+```
+For pass 2 terms.
+
+Output:
+```
+    prog.set_output_action(0, {}, 0.0)
+    prog.set_output_action(1, {"DR_l1":S, "DR_l2":S, "DL_l1":S, "DL_l2":S, "UL_pass":S}, 40.0)
+    prog.set_output_action(2, {}, -20.0)
+    prog.set_output_action(3, {"DR_r1":S, "DR_r2":S, "DL_r1":S, "DL_r2":S, "UR_pass":S}, 40.0)
+    prog.set_output_action(4, {}, -20.0)
+    prog.set_output_action(5, {}, -20.0)
+    return MLPCompilerBackend.compile(prog)
+```
+
+Need ensure h2 names exist before output. Yes.
+
+Now, let's think if h2 AND with 4 terms where one term is dy_nonneg. For down-left, dy_nonneg true for dy=0/1. Good.
+
+Now, potential issue: In a down state with dx_right true, dy_nonneg true, but both DR_A and DR_B false? They cover all q. q integer 0..18, A true q<=9, B true q>=10. Good. For DL, G/H cover x+y>=9/<=8. Good.
+
+Now, potential issue: For DR segment B target=19-q. q max18 target1. There is no target0 for DR? If q=19 would target0, but q max18. Can DR target0? Starting x=0,y? q=x+9-y. To get q=19 need x-y=10, impossible (x<=9,y>=0 => max9). So DR never targets0? If ball moving down-right, can it reach x=0 at bottom? It would have to reflect at right wall and come back to0. Max t=9, x max9, q max18, target min1. Indeed from x=9,y=0,t=9, sequence 9,9,8,7,6,5,4,3,2,1 target1. It doesn't reach0 in 9 steps due to double at9. Good.
+DL target can be0..8, not9? q min10 target9 when x+y=9? Segment A target x+y-9, max9 when x+y=18. So DL can target9. Good.
+
+Now, check DL segment A for x+y=18 (x=9,y=9? y=9 terminal; x=9,y=8 t=1, dx=-1 from9: next8, target8, not9. Wait x+y=17? Let's recalc. DL q=28-x-y. Segment A q<=19 => x+y>=9. target=19-q = x+y-9. If x=9,y=8, x+y=17, target8. Good. Max x+y for down y<=8,x<=9 is17, target8. If y=9 (not), target9. So DL target max8? But earlier x=0,y=0 target8. So DL target 0..8. Can DL target9? If x=9,y=9 (terminal) or x=8,y=9. Not. So target9 not for down-left except maybe y=9. Fine.
+
+DR target min1, max9. DL target max8, min0. Good.
+
+Now, output no-op when target equal. If target0 and p0, no-op. Good.
+
+Now, let's consider if paddle position p can be 0..9. Paddle_x weights only row9. Good.
+
+Now, maybe we should include a bias for no-op higher than false? false -10, noop0. Good.
+
+Now, final design description should be brief but enough. Mention correct wall-clamping reflection (period 20) maybe.
+
+Now, one more thought: The ball's vertical motion also has double at top/bottom. Our down t=9-y assumes ball moving down and no vertical brick bounces. If ball is at y=0 moving down, t=9. If ball at y=0 moving up (ambiguous), we treat down with t=9 after top bounce? At top bounce state y=0,dy=0,dx known, actual next step stays y=0 then down, total time to bottom =10, not9. Our down prediction uses t=9, one step short. This could cause misprediction at top bounce. Example ball at y=0,x=0,dx=+1, p? Actual sequence: step1 y0,x1 (top double), then y1,x2,... y9,x10 reflect9? Let's simulate: t=10, horizontal x changes 10 steps? At step1 x1, then 9 steps to bottom x10 reflect9? Target9. Our t=9: q=0+9=9 target9. Same! Because horizontal x changes every step, including top double step. t=9 vs10? Wait actual total steps to bottom from y=0 moving up: step1 y0 (top double), x+1; steps2-10 y1..9, x+1 each, total 10 horizontal changes. Our t=9 gives 9 changes. For x=0, actual target? Sequence x:0,1,2,3,4,5,6,7,8,9,9? At bottom y9 after 10 steps x9. Our t=9 x9. Same because at x=9 double? For x=0, 9 changes reaches9, 10 changes stays9. Target same. For x=1, actual 10 changes: 1,2,3,4,5,6,7,8,9,9,9? target9. Our t=9: 1+9=10 target9 (q10 target9). Same. For x=2, actual 10 changes: 2..9,9,9,9? target9. Our t=9: 11 target8? q=11 target8. Difference! Let's simulate actual: start y0,x2,dx+1, moving up (top bounce). Step1 y0,x3; step2 y1,x4; step3 y2,x5; step4 y3,x6; step5 y4,x7; step6 y5,x8; step7 y6,x9; step8 y7,x9 (wall double); step9 y8,x8; step10 y9,x7. Target7. Our t=9: q=2+9=11 target8. Off by1. So top bounce one-step vertical double causes horizontal target off by1 for some x. But after top bounce state, ball will next step down; our policy treats it as down with t=9, but actual t=10. It may misposition by1. However next step after top double, state y=0? Wait top bounce state is y=0,dy=0,dx=+1. Our policy acts based on this state, thinking t=9. It may move one step. Next step actual ball y=0,x+1,dy=0? No, after top double, ball y=0, trail y=0, dx same, dy=0? Let's simulate: state S0: ball y0,x2, trail y0,x1? Actually after top bounce step, trail y0,x1? Ball y0,x2? Wait top bounce occurs when from y0 up to -1->0. The ball's x changes by dx during that step. So state after top bounce: ball y0, x=old_x+dx, trail y0, old_x. dy=0, dx known. Next act: last_y=0, new_y=1 (down), x+dx. So after one step, ball y1, trail y0, dy=1, dx known. Our policy at S0 used t=9 (from y0) but actual remaining steps to bottom from S0 is 10 (including next step to y1? From y0 to9: if moving down, 9 steps; but S0 is moving up? It will next step y0? Wait S0 is after top bounce, direction is down? Code: if new_y<0, new_y=0, ball_dir vertical flip. So after top bounce, ball_dir is down. But trail y=0, ball y=0, so dy=0 in observation, but actual direction is down. From S0, next step new_y=1. So remaining steps to bottom =9 (from y0 to9) if direction down. But the top double step already occurred. So t=9 is correct! My earlier actual sequence from S0: step1 y1, not y0. I mistakenly included another top double. Let's clarify:
+Before top bounce: ball y0, dir up. Act: new_y=-1->0, dir down, x changes. State S0: y0, dir down, trail y0 (old), ball y0. Next act: new_y=1. So from S0 to bottom: 9 steps. Horizontal changes 9. Our t=9 correct. Good. The top double step is the act that produced S0; we don't act on the pre-bounce state? We do act on pre-bounce state (y0,dy=-1) with up follow, moving paddle. Then environment does top double. Next observation S0, we act down with t=9. Good. So no off by1.
+
+Similarly brick bounce: state after bounce y=4, dir down, trail y=4. Remaining steps to bottom =5 (y4 to9). Our t=5 correct. The bounce step already occurred. Good.
+
+Wall horizontal double: state after wall bounce x=0, dir right, trail x=0. Remaining horizontal steps to target? Our down prediction uses t=9-y and dx known? But at wall bounce state, dx=0 in observation, so our policy no-op. Next observation after one step, dx known, t reduced by1. The wall double step already occurred. If we could infer dx, t correct. We don't. One-step delay.
+
+Now, vertical double at bottom? Catch occurs before terminal; no.
+
+Now, need consider if ball moving down and hits a brick? Bricks only rows1-3; ball moving down from above bricks? It can be moving down in brick area if brick broken? It may hit brick and bounce up, changing dy. Our policy at state before brick hit (dy=down) predicts bottom target assuming no brick. If ball hits brick, it bounces up, and next state dy=0 (vertical bounce) with dx known, our policy switches to down? Wait after brick hit, ball_dir vertical flips to up, not down. Let's parse: ball moving down (dy=+1) hits brick: new_y=last_y, ball_dir = [3,2,1,0][dir], which flips vertical: down becomes up. So after brick hit, ball is moving up, not down. Observation dy=0 (trail y=last_y, ball y=last_y), dx known. Our dy_nonneg true, so we treat as down, but actual direction is up! This is a problem. When ball moving down hits a brick, it bounces up. Our vertical bounce handling dy=0 as down is wrong for brick hits from below? Let's analyze.
+
+Ball can be moving down in brick area if it is above bricks? Bricks rows1-3. Ball starts at row3 moving down, leaves. It can be moving down in rows1-3 if it was bounced by paddle? Paddle at bottom sends ball up, not down. Ball moving down in brick area occurs after it has bounced off top/wall and is descending through brick rows. If it hits a brick, it bounces up. At the moment of brick hit, observation after act has dy=0, dx known, but actual direction is up (because it bounced). Our policy will treat as down and move toward predicted bottom, which may be wrong. However the ball is now moving up; up follow would be better. How to distinguish vertical bounce from brick (direction up) vs top (direction down)? Both have dy=0,dx=±1. The difference is ball_y: brick bounce occurs at y=4? If ball moving down hits brick at row3, last_y=4, new_y=4. So y=4 (or if brick row2, y=3? If ball moving down from y=2 to1 brick, last_y=2, new_y=2; y=2). Top bounce occurs at y=0. Also ball moving down hitting brick at row1? y=1. So vertical bounce y>0 likely brick, direction up; y=0 top, direction down. Also ball moving up hitting brick bounces down at y=4 (or y=3/2/1 if brick broken? Actually moving up from below hits brick row3, bounces at y=4; direction down). So dy=0,dx known can be either up or down depending on previous dy, which is not observable if trail same y. But we can infer from ball_y and maybe bricks? If y=0 => top => down. If y>0 => could be brick bounce. Which direction? If ball was moving up and hit brick, it bounces down; if moving down and hit brick, bounces up. Both at y=4 for full bricks? Moving up from y=4 to3 brick bounces at y=4, direction down. Moving down from y=4 to3 brick? If ball at y=4 moving down, new_y=3 brick, bounces to y=4, direction up. Same state y=4,dx known, but direction opposite! How to distinguish? The trail x differs? In both cases trail y=4, ball y=4, trail x = old x, ball x = old x + dx. For moving up before hit, dx same, old x = ball x - dx. For moving down before hit, dx same, old x = ball x - dx as well? Let's see: moving up: old y=4? Wait moving up from y=5 to4? To hit brick row3, ball must be at y=4 moving up, old x, new x=old+dx, bounce y=4. Trail x=old, ball x=old+dx. Moving down from y=4 to3, old x, new x=old+dx, bounce y=4. Same observation! The direction after bounce is opposite, but observation identical. The environment's hidden ball_dir differs, but state() only shows ball and trail same y, x differs. It does not reveal vertical direction. This is a fundamental ambiguity. The trail channel shows horizontal direction but not vertical after vertical bounce. The game's ball direction is indicated by trail channel, but when vertical bounce occurs, trail y same, so vertical direction not indicated. The agent must infer from context (previous actions/observations) or use hidden state? The network only sees current observation, no memory. It cannot distinguish up vs down after a brick bounce at y=4. This is important.
+
+Our policy treating dy=0 as down may be wrong half the time. Previously treating dy=0 as no-op avoided wrong direction but lost one step. Which is better? If we treat as down, when actual up, we may move toward bottom target, potentially misalign. If no-op, we lose one step but then next observation dy=±1 reveals direction. Maybe no-op is safer. The original direction units (dy=0 false) may be better due to ambiguity. We need decide.
+
+At brick bounce, after one no-op, next step ball moves either up or down, dy=±1, policy correct. The one-step delay may be okay. If we treat as down, and actual up, we may move wrong for one step, then next step up follow. Could be worse. Example ball at y=4,x=4,p=4, actual up after brick hit. If treat down, target q=4+5=9, move right to5. Next step ball y=3? If actual up, ball y=3? Wait if actual up, from y=4 up to3 (if no brick? But it just bounced from brick, so brick at row3? It cannot go to3 if brick present; it will bounce again? Let's simulate: state after brick hit from moving down: ball y=4,x=4, dir up, brick at (3,5)? Next act: new_y=3 brick, bounce to y=4,x=5, dir down. So ball stays y=4, x5. Paddle moved right to5. Aligned! Then down. If actual down after brick hit (from moving up), next act ball y=5,x5, paddle at5, aligned. So treating as down may actually maintain alignment if target leads to x+dx? In both cases, ball x changes by dx next step (either up bounce or down), paddle moved toward target which for y=4,x=4,dx+1 target9, moved right to5. Aligned. If target difference large, maybe. But if actual up and ball will bounce off brick again, x changes by dx, paddle moving toward bottom target also moves in dx direction? For y=4, down target q=x+5. If x small, target >x, move right (dx+1). If x large, target may be left, but dx+1? Example x=8,dx+1,y=4. Down target q=13 target6, p8 => move left, but actual up ball next x=9 (right). Paddle moves left, misalign. If no-op, p8, ball x9, misalign by1 but next down? Let's see actual up: ball x8,y4, dx+1, brick at9? Next step x9,y4 (brick bounce), p8. Then down, target from x9,y4 q=13 target6, p8 move left, 5 steps to6, catch. If we had moved left to7, target6, 5 steps to6, also catch. Maybe okay. If p9, down target6, move left to8, ball x9, then target6, 5 steps from8 to6, catch. No-op p9, 5 steps to6, catch. Both okay. So treating dy=0 as down may not be fatal, but could be suboptimal.
+
+Given ambiguity, maybe no-op is safer and simpler. But we already changed to dy_nonneg. Should we revert to original direction (dy=1 only) to avoid wrong down after brick? Let's evaluate.
+
+Original direction: dy=0 false => no-op. After brick bounce, one no-op, then direction known. This is safe. It may lose one step but likely enough. Treating dy=0 as down may improve top bounce but risk brick. Since brick bounces are frequent, no-op may be better. The one-step delay at brick bounce: ball at y=4, after no-op, next step if actual down, y=5, t=4; if actual up, it may bounce again at y=4, t still5? The policy then knows direction. If actual down, it has 4 steps to bottom; if paddle was aligned, target=p? At y=4,x=p, down target may not be p (as earlier x4 target9). It needs 5 steps from y4, but after no-op has 4 steps, may miss if distance5. Example aligned p4, actual down after brick bounce (from moving up). State y4,x4,p4. No-op. Next step y5,x5, p4. Down target from y5,x5: q=5+4=9 target9, distance5, t=4, miss! If we had treated as down at y4, target9, move right to5, then next y5,x5,p5, distance4, catch. So no-op can be fatal after brick bounce when actual down and target far. Treating as down helps. If actual up, treating as down may still be okay? Let's test x8,p8, actual up. Treat down target6, move left to7. Next step ball x9,y4 (brick bounce), p7. Now actual down, target from x9,y4 q=13 target6, distance1, t=5, catch. Good. If p9, move left to8, catch. If x0,p0, actual up, treat down target5? q=0+5=5, move right to1. Next ball x1,y4, p1, down target? q=1+5=6, distance5, t=5 catch. Good. So treating dy=0 as down seems beneficial and maybe always moves in a direction that helps because target from y=4 with t=5 is close to where ball will be after one step? Let's analyze generally.
+
+At vertical bounce state y=4, dx=+1, ball x=c, paddle p. If actual down, next state y=5,x=c+1 (or wall), t=4. If we act based on down target from y=4: target T = f(c+5). We move one step toward T. After one step, paddle p' = p + sign(T-p) (clamped). Ball x'=c+1. Need be able to reach T in 4 steps: |T-p'| <=4. If p was aligned c, p'=c+sign(T-c). T is c+5 reflected. For c=0..4, T=c+5, p'=c+1, distance4. For c=5, T=10? q=10 target9, p'=6? c5, T9, p'=6, distance3. c=6, T8, p'=7, dist1. c=7, T7, p'=7, dist0. c=8, T6, p'=7, dist1. c=9, T5? q=14 target5, p'=9 (right clamp), dist4. So catch. If actual up, next state likely y=4,x=c+1 (brick bounce) or y=3 if no brick, but t maybe5 or more. Paddle p' as above. If brick bounce, state y=4,x=c+1, actual down, target T' = f(c+1+5)=f(c+6). Need |T'-p'|<=5. Likely. If no brick top, more time. So treating dy=0 as down seems good.
+
+What about vertical bounce at y=0 top: treating down good. At y=2/3 brick bounces? If ball moving down hits brick at row1/2, bounce y=2/3, actual up. Treating down with t=9-y maybe. Could be okay? If actual up, it may bounce again soon. If actual down (from moving up hitting brick at row3? y=4; if brick broken, could bounce at y=3/2/1), treating down may help. The ambiguity remains, but down prediction seems a reasonable default because after a vertical bounce, the ball will either be moving down (if it was up) or up (if it was down). If it's up, it will likely bounce off another brick soon and come down; moving toward the eventual bottom target may still be okay. Maybe down default is better than no-op.
+
+What about vertical bounce at y=4 when actual up and no brick ahead (broken), ball goes up to top, t large. Treating down with t=5 may underlead, but after next step direction up known, up follow will maintain. If paddle moved toward bottom target, may be off, but up follow maintains relative? It may not be aligned. Example c=0,p0, actual up no brick, treat down target5, move right to1. Ball next y3,x1, p1, aligned! Up follow maintains. Good. c=8,p8, actual up no brick, treat down target6, move left to7. Ball next y3,x9, p7, misalign by2. Up follow right, ball x9 (wall), p8, then dx flips, etc. May still catch. No-op would p8, ball x9, misalign1. Treating down worse by1. But maybe okay.
+
+Given the potential fatal no-op after brick down, I lean to keep dy_nonneg (down default) for dy=0. It uses down prediction, which is more active. The ambiguity may cause some errors but likely better.
+
+Can we distinguish actual up vs down after vertical bounce using brick channel? If ball at y=4, trail x=c-dx, ball x=c. If there is a brick at (3,c+dx) and ball was moving up, it would have bounced down; if brick at (3,c-dx)? Hmm. The observation includes bricks. At vertical bounce y=4, the brick that caused bounce is at row3, column c+dx? If ball moving up from y=4 to3, it hit brick at (3,c+dx) and bounced down. If ball moving down from y=4 to3, it also hit brick at (3,c+dx) and bounced up. Same brick. So cannot distinguish. If brick at (3,c+dx) is present, both possible. If absent, no bounce. So no.
+
+Thus down default is a heuristic.
+
+Now, what about dy=0,dx=0 (reset or top with dx? top dx not0). No direction, no-op.
+
+Now, need update design description: vertical bounces (trail and ball same row) are treated as down when horizontal direction is known, because the ball is usually about to descend or will soon descend; this avoids losing a step.
+
+Now, let's ensure h1 dy_nonneg true for dy=0 and1. Good.
+
+Now, one more issue: h1 dx_right/dx_left use ball_x - trail_x. At vertical bounce, dx known. At reset dx=0. At wall bounce dx=0. Good.
+
+Now, let's think about if ball and trail same cell (reset) but dy_nonneg true, dx false, no direction. Good.
+
+Now, final code with dy_nonneg.
+
+Let's maybe increase output bias b=40, S=10. Good.
+
+Now, need consider if h2 4-way AND with dy_nonneg and dx_right could be true when ball moving up? dy_nonneg false for dy=-1, so no. Good.
+
+Now, let's maybe add a h2 unit for "down_active" = dx_right OR dx_left AND dy_nonneg? Not needed.
+
+Now, final answer. But before final, let's consider if the IR's h1 units are limited to 32; we use 16. h2 10. Good.
+
+Now, potential syntax: The code block should be complete. It may need to import MLPProgram? I think not. But to be safe, we can include a try/except import? The prompt says use following IR and backend; likely they are in global namespace. Adding imports could cause ModuleNotFoundError. Avoid.
+
+Now, let's write final design brief:
+- Strategy: predictive catch. If ball is descending (or just after a vertical bounce with known horizontal direction), compute the column where the ball will be at row 9 using the MinAtar wall-clamping horizontal reflection (period 20) and move toward that column. If ball is ascending, follow its horizontal direction to keep the paddle under the ball; this maintains alignment through brick/wall/top bounces. No-op when predicted column equals paddle.
+- Hidden units: h1: dx_right, dx_left, dy_up, dy_nonneg; for down-right and down-left, segment indicators (which side of wall reflection) and sign indicators (target > paddle / target < paddle). h2: 4-way AND gates for the eight down right/left cases, 2-way AND gates for up-right/up-left. Output: right/left logits sum the relevant h2 gates with strong bias; no-op wins when no gate active.
+
+Now, code. Ensure comments not too long.
+
+Double-check thresholds in code:
+add_h1("dx_right", 1,0,-1,0,0, 0.5)
+add_h1("dx_left", -1,0,1,0,0, 0.5)
+add_h1("dy_up", 0,-1,0,1,0, 0.5)
+add_h1("dy_nonneg", 0,1,0,-1,0, -0.5)
+DR_A: -1,1,0,0,0,-0.5
+DR_B: 1,-1,0,0,0,0.5
+DR_C: 1,-1,0,0,-1,-8.5
+DR_D: -1,1,0,0,1,9.5
+DR_E: -1,1,0,0,-1,-9.5
+DR_F: 1,-1,0,0,1,10.5
+DL_G: 1,1,0,0,0,8.5
+DL_H: -1,-1,0,0,0,-8.5
+DL_I: 1,1,0,0,-1,9.5
+DL_J: -1,-1,0,0,1,-8.5
+DL_K: -1,-1,0,0,-1,-7.5
+DL_L: 1,1,0,0,1,8.5
+
+Let's verify dy_up: var = -ball_y + trail_y = -dy. threshold0.5. If dy=-1, var=1, z=20*(1-0.5)=10 true. If dy=0, -0.5 false. If dy=1, -1.5 false. Good.
+dy_nonneg: var=dy, threshold -0.5. dy=0 =>0.5 true, dy=1=>1.5, dy=-1=>-0.5 false. Good.
+
+Now, h2 add_and terms order doesn't matter.
+
+Now, output action indices: 0 no-op, 1 left, 2 up, 3 right, 4 down, 5 fire. Good.
+
+Now, one more thought: The action map in env: ['n','l','u','r','d','f'], so left=1, right=3. Good.
+
+Now, final code block. Should we include `return MLPCompilerBackend.compile(prog)` exactly. Yes.
+
+Now, if the evaluator expects an edits block, this may fail. But final instruction. Could we also include an edits block after the Python code? The prompt says only LAST edits block read. If we include an edits block, it might be used instead of build_policy. But the final says return one complete Python code block. I will not include edits block.
+
+However, the initial "HOW TO WRITE THE WEIGHTS" says write a code block whose opening line is three backticks followed by the word edits. The final "Use the following NeuralCompiler IR and backend to build a policy. Return one complete Python code block defining build_policy()..." might be a separate requirement from the platform. In many tasks, they want the final answer to be an edits block, but here they explicitly provide IR and backend and ask build_policy. The phrase "Return one complete Python code block defining build_policy()" is likely the actual output format for this prompt. I'll follow that.
+
+Could we make the Python code block also be an edits block? No.
+
+Now, let's ensure no forward pass or feedback. Code only builds.
+
+Now, final answer with design and code. Keep design brief. Use final.
+</think>
+
+Design:
+- Strategy: predictive catch. When the ball is descending (or just after a vertical bounce with known horizontal direction), compute the bottom-row column where the ball will arrive, using MinAtar’s wall-clamping horizontal reflection, and move toward that column. When the ball is ascending, follow its horizontal direction to keep the paddle aligned. No-op when the predicted column equals the paddle column.
+- Hidden units:
+  - Layer 1: horizontal/vertical direction indicators, and for down-right/down-left: segment indicators for the reflected horizontal phase and sign indicators for “target > paddle” / “target < paddle”.
+  - Layer 2: AND gates combining direction + segment + sign for the eight down-moving right/left cases, plus two AND gates for up-right/up-left.
+  - Output: right/left logits sum the relevant Layer-2 gates with a strong bias; no-op wins when no movement gate is active.
+
+```python
+def build_policy():
+    prog = MLPProgram(
+        input_dim=600,
+        h1_dim=32,
+        h2_dim=32,
+        output_dim=6,
+        activation="tanh",
+    )
+
+    G = 20.0
+    G2 = 20.0
+    S = 10.0
+
+    def idx(r, c, ch):
+        return (r * 10 + c) * 6 + ch
+
+    def make_weights(bx=0.0, by=0.0, tx=0.0, ty=0.0, px=0.0):
+        w = {}
+        for r in range(10):
+            for c in range(10):
+                v = 0.0
+                if bx:
+                    v += bx * c
+                if by:
+                    v += by * r
+                if v:
+                    i = idx(r, c, 3)
+                    w[i] = w.get(i, 0.0) + v
+
+                v = 0.0
+                if tx:
+                    v += tx * c
+                if ty:
+                    v += ty * r
+                if v:
+                    i = idx(r, c, 4)
+                    w[i] = w.get(i, 0.0) + v
+
+        if px:
+            for c in range(10):
+                v = px * c
+                if v:
+                    i = idx(9, c, 0)
+                    w[i] = w.get(i, 0.0) + v
+        return w
+
+    def add_h1(name, bx, by, tx, ty, px, threshold):
+        prog.add_h1_threshold(
+            name,
+            make_weights(bx, by, tx, ty, px),
+            threshold,
+            G,
+        )
+
+    # Direction indicators.
+    # dx_right: ball_x - trail_x == 1
+    # dx_left:  trail_x - ball_x == 1
+    # dy_up:    trail_y - ball_y == 1
+    # dy_nonneg: ball_y - trail_y >= 0  (down or vertical-bounce ambiguity)
+    add_h1("dx_right", 1, 0, -1, 0, 0, 0.5)
+    add_h1("dx_left", -1, 0, 1, 0, 0, 0.5)
+    add_h1("dy_up", 0, -1, 0, 1, 0, 0.5)
+    add_h1("dy_nonneg", 0, 1, 0, -1, 0, -0.5)
+
+    # Down-right:
+    # q = x + 9 - y, range 0..18.
+    # target = q if q <= 9, else 19 - q.
+    add_h1("DR_A", -1, 1, 0, 0, 0, -0.5)   # q <= 9
+    add_h1("DR_B", 1, -1, 0, 0, 0, 0.5)    # q >= 10
+    add_h1("DR_C", 1, -1, 0, 0, -1, -8.5)  # q - p > 0
+    add_h1("DR_D", -1, 1, 0, 0, 1, 9.5)    # p - q > 0
+    add_h1("DR_E", -1, 1, 0, 0, -1, -9.5)  # 19 - q - p > 0
+    add_h1("DR_F", 1, -1, 0, 0, 1, 10.5)   # q + p - 19 > 0
+
+    # Down-left:
+    # q = 28 - x - y, range 10..28.
+    # If q <= 19: target = x + y - 9.
+    # If q >= 20: target = 8 - x - y.
+    add_h1("DL_G", 1, 1, 0, 0, 0, 8.5)     # x + y >= 9  (q <= 19)
+    add_h1("DL_H", -1, -1, 0, 0, 0, -8.5)  # x + y <= 8  (q >= 20)
+    add_h1("DL_I", 1, 1, 0, 0, -1, 9.5)    # (x + y - 9) - p > 0
+    add_h1("DL_J", -1, -1, 0, 0, 1, -8.5)  # p - (x + y - 9) > 0
+    add_h1("DL_K", -1, -1, 0, 0, -1, -7.5) # (8 - x - y) - p > 0
+    add_h1("DL_L", 1, 1, 0, 0, 1, 8.5)     # x + y + p - 8 > 0
+
+    def add_and(name, terms):
+        k = len(terms)
+        prog.add_h2_gate(
+            name,
+            {t: G2 for t in terms},
+            bias=-(k - 0.5) * G2,
+        )
+
+    # Down-moving right/left gates.
+    add_and("DR_r1", ["dx_right", "dy_nonneg", "DR_A", "DR_C"])
+    add_and("DR_r2", ["dx_right", "dy_nonneg", "DR_B", "DR_E"])
+    add_and("DR_l1", ["dx_right", "dy_nonneg", "DR_A", "DR_D"])
+    add_and("DR_l2", ["dx_right", "dy_nonneg", "DR_B", "DR_F"])
+
+    add_and("DL_r1", ["dx_left", "dy_nonneg", "DL_G", "DL_I"])
+    add_and("DL_r2", ["dx_left", "dy_nonneg", "DL_H", "DL_K"])
+    add_and("DL_l1", ["dx_left", "dy_nonneg", "DL_G", "DL_J"])
+    add_and("DL_l2", ["dx_left", "dy_nonneg", "DL_H", "DL_L"])
+
+    # Up-moving: follow horizontal direction.
+    add_and("UR_pass", ["dx_right", "dy_up"])
+    add_and("UL_pass", ["dx_left", "dy_up"])
+
+    # Output scoring.
+    prog.set_output_action(0, {}, 0.0)
+    prog.set_output_action(
+        1,
+        {
+            "DR_l1": S,
+            "DR_l2": S,
+            "DL_l1": S,
+            "DL_l2": S,
+            "UL_pass": S,
+        },
+        40.0,
+    )
+    prog.set_output_action(2, {}, -20.0)
+    prog.set_output_action(
+        3,
+        {
+            "DR_r1": S,
+            "DR_r2": S,
+            "DL_r1": S,
+            "DL_r2": S,
+            "UR_pass": S,
+        },
+        40.0,
+    )
+    prog.set_output_action(4, {}, -20.0)
+    prog.set_output_action(5, {}, -20.0)
+
+    return MLPCompilerBackend.compile(prog)
+```

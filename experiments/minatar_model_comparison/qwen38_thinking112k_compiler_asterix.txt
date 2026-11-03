@@ -1,0 +1,1603 @@
+We need answer user's request. Need design policy from scratch, no training, no forward pass, no rollouts, no feedback, no code execution. Output complete Python function build_policy() returns ExecutableMLP architecture 600 -> 32 -> 32 -> 6 tanh. Use NeuralCompiler IR and backend. Single attempt without testing. Need provide one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program). Need think carefully.
+
+We need produce code only? User: "Output a complete Python function build_policy() ... Return one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program). Do not train, test, run model forward passes or use feedback." So final should be code block only likely. Need include imports? They say use following IR and backend. We can assume MLPProgram and MLPCompilerBackend available? Need define build_policy only. Could include from .ir import MLPProgram? But in code block maybe just function. They want complete Python function. We can reference MLPProgram, MLPCompilerBackend. Need ensure no execution. Need design policy.
+
+Environment: AsterixEnv. Observation 10x10x6 flattened row-major. Channels: obs[:,:,0]=player, obs[:,:,1]=enemy, obs[:,:,2]=gold, obs[:,:,4]=trail. Channel 3 and 5 zero? Actually wrapper: obs[:, :, 0] = s[:, :, 0] player; obs[:, :, 1] = s[:, :, 1] enemy; obs[:, :, 2] = s[:, :, 3] gold; obs[:, :, 4] = s[:, :, 2] trail. So channels: 0 player, 1 enemy, 2 gold, 4 trail. 600 inputs.
+
+Actions: 0 no-op, 1 left, 2 up, 3 right, 4 down, 5 fire. Sampled softmax; with prob 0.1 previous action repeated. Episodes end terminal or 10000. Need policy. We can design simple heuristic encoded in MLP. Need architecture 600->32->32->6. Only 32 hidden units each layer. Need enough to implement simple policy.
+
+We need understand game. Player at (x,y) with x horizontal 0..9, y vertical 1..8 (top row y=0? bottom y=9? Movement up max(1,y-1), down min(8,y+1), so y in 1..8). Entities: 8 slots, each [x, y=slot+1, lr, is_gold]. lr True means moving left? In act: x += 1 if x[2] else -1. Wait if x[2] is lr? _spawn_entity: lr = random <0.5; x = 0 if lr else 9; entity [x, slot+1, lr, is_gold]. If lr True, x=0 and x += 1 if x[2] else -1 => moves right. So x[2] True means moving right? They call lr maybe left/right? Actually if lr True spawn left and move right. If False spawn right and move left. So direction bit: True = moving right, False = moving left.
+
+Collision: if entity at player pos: if gold (x[3]) reward +1 and remove; else terminal. Also after move_timer, entities move; if collide with player: gold reward, enemy terminal.
+
+Spawn: every spawn_speed steps (initial 10, ramp down to 1? ramping reduces spawn_speed and move_speed over time). Entities in 8 rows y=1..8. x moves horizontally. Trail channel: back_x = x - 1 if x[2] else x + 1, i.e. behind entity? If moving right (x[2]=True), back_x = x-1 (left behind); if moving left, back_x=x+1 (right behind). Trail indicates cell behind entity.
+
+Goal likely survive and collect gold, avoid enemies. Need policy. With 32 units, can detect nearest threats? Maybe simple: if enemy in same row ahead, move up/down away; if gold in same row ahead, move toward; else no-op/fire? Fire action? There is no shot_timer used? act ignores 'f' except no movement. Maybe fire does nothing? In source, action 'f' no effect. So avoid fire. No-op maybe safe? But entities move; need dodge.
+
+Observation includes player, enemy, gold, trail. We can design policy using local features. Need encode in 2-layer MLP with tanh. 32 H1, 32 H2. Need output logits. We can use threshold units in H1 to detect features, H2 combine, output rules.
+
+Need be careful with tanh and thresholds. H1 THRESHOLD: h1 = tanh(gain*(sum w x - threshold)). Inputs are 0/1 mostly. We can set weights to sum over cells. For detection of any enemy in a region: weights 1 over region, threshold 0.5, gain high => +1 if any. For count? Could use threshold at 0.5. For specific cell: weight 1, threshold 0.5.
+
+H2 gate: tanh(sum w h1 + bias). H1 outputs approx ±1. We can create logic. Output logits: h2 @ W3 + b3. We can set output rules with h2 terms and bias. Need produce logits favoring action. Since softmax, can set high positive for desired action, negative for others. But output rules only add to specific action; other actions default bias maybe 0. We can set output_bias list to negative for all, then rules add positive. Or set bias in rules. Need ensure one action high. Could set b3 = [-10,-10,-10,-10,-10,-10] and for desired action add +20 via h2 terms? But output rule bias sets b3[action]=bias, not add? In compile: if output_bias is not None: b3[:] = array. Then for rule: W3 +=; if "bias" in rule: b3[act_idx] = float(rule["bias"]) (overwrites). So if we set output_bias and then rule bias, rule bias overwrites. We can set output_bias = [-10]*6, and in rules not include bias, then W3 terms add to -10. Or include bias = 10? But if include, overwrites to 10. Better set output_bias negative and rules with h2 terms positive. But if no h2 active, all -10 uniform. If desired h2 +1 with weight 20, logit 10. Good.
+
+Need design within 32 H1 and 32 H2. Need maybe use H1 for features:
+- player position? We may not need exact, but for relative directions maybe need know player row/col. Could detect player at each row/col? 10 rows, 10 cols. But only 32 units. Could use spatial coordinate extractor to compute player x and y? H1 can be linear combination of player channel with col weights to estimate x, row weights to estimate y. But tanh threshold? We can use RAW H1 to pass linear coordinate? H1 RAW: tanh(sum w x + bias). If weights col index, sum = player_x (0..9). tanh of 0..9 saturates +1 for >~2, not useful. Could scale small: weight 0.1, bias -0.45 => tanh(0.1*x -0.45) ranges -0.42 to 0.76, not binary. But H2 can use? Maybe not.
+
+Alternative policy independent of player position? Since entities spawn in rows 1..8 and move horizontally. Player can move vertically to avoid. Could use global features: enemy ahead in same row? Need know player row. Could detect if any enemy in row above/below? Maybe use row filters.
+
+Simpler: Always move up/down to center? But enemies in rows 1..8, player y 1..8. If always up, may hit top? Up max 1. Could oscillate? No memory except previous action repeated 0.1. Policy stateless. Could choose action based on local threats around player. Need detect threats relative to player.
+
+Maybe use convolution-like features: For each direction, detect enemy/gold in cells adjacent or ahead in same row. Since player position unknown to network? But input includes player cell; we can create features that are relative by using player as anchor? MLP with fixed weights cannot easily compute relative positions without knowing player coordinates. But we can create features for each absolute cell and combine with player? With 32 units limited.
+
+Could design policy that uses absolute positions: e.g., if enemy in left half, move right; if enemy in right half, move left; if enemy above, move down; if enemy below, move up; if gold in same row ahead, move toward; else no-op. This doesn't need player position? It uses global distribution. But if player not in same row, moving horizontally may not help. Yet maybe okay.
+
+Need robust enough? The task likely expects a plausible policy, not necessarily optimal. Single attempt. Need use IR. Could make simple survival: avoid enemies by moving vertically away from nearest enemy row. Detect enemies in top half vs bottom half, left vs right. If more enemies above player? Need player row. Could detect player row via threshold units? Maybe 8 row detectors for player? That's 8 H1. Then H2 compare enemy row above/below? But H2 can only combine H1, not multiply? It can sum signed H1. We can create H1 for player row one-hot (8 units) and enemy presence in top/bottom? To decide up/down, need if enemy in same row? Could detect enemy in row above/below using H1 row-specific enemy detectors (8 units). Total 16. Then H2: if enemy in row above, move down; if enemy in row below, move up; if enemy in same row, maybe move vertical away based on player row? But same row threat requires horizontal dodge.
+
+Maybe use row-specific enemy detectors: enemy_row_r = any enemy in row r. player_row_r = player at row r. H2 can compute threat_above = OR over r of player_row_r AND enemy_row_{r-1}? But H2 is single layer linear over H1, cannot AND two H1? It can approximate with tanh of sum: if both +1, sum 2; if one, 1; bias -1.5 => +1 only both. That's AND. But to OR over multiple pairs, need multiple H2 units or one H2 with terms for all pairs? A single H2 linear sum of H1 cannot implement OR of ANDs because AND requires product. But H1 can implement AND gates using add_h1_and_gate over input groups. We have H1 AND over input indicators, not H1-H1. Could create H1 units for conjunctions of player row and enemy row? Input groups: player row r and enemy row r-1. But enemy row r-1 is not a single input, it's OR over cells. add_h1_and_gate expects group_a_indices and group_b_indices of input indices, outputs +1 iff both groups have active input. It uses weights gain on each input in both groups and bias -1.5 gain. If group_a has multiple inputs (player row r has 10 cells? but only one player, so any active) and group_b has enemy row r-1 cells (any active), then if both groups have at least one active, sum = gain*(#active_a + #active_b). But if group_a has 10 cells and only one active, #active_a=1; group_b may have multiple enemies, #active_b could >1. Bias -1.5 gain. If both active, sum >=2 gain => +0.5 gain => tanh positive. If only one group active with many enemies, sum could be >1.5 gain if >1 enemies, false positive. Need group sizes controlled. For player row group, exactly one active if player in row. For enemy row group, could be multiple enemies in same row (up to 8). If only enemy row active and no player, sum = k*gain. If k>=2, >1.5 gain => false positive. Could set gain? Bias -1.5 gain; false if k>1.5. Not robust. Could use threshold unit for enemy row presence (binary) but H1 AND only over inputs, not H1. Could create H1 enemy_row_presence binary, but cannot AND with player_row in H1. H2 can AND two H1 binary units: h2 = tanh(w1*h1a + w2*h1b - bias). That works. So use H1 binary detectors for player row and enemy row, then H2 AND/OR.
+
+But H2 only 32 units. Need maybe create H2 for each threat direction. Could use H2 units:
+- player_row_r (8 H1)
+- enemy_row_r (8 H1)
+- gold_row_r? maybe 8 H1
+Total 24 H1. H2 8? Need combine.
+
+H2 can compute for each r: threat_same_row = player_row_r AND enemy_row_r. But 8 H2. threat_above = player_row_r AND enemy_row_{r-1} for r=2..8? 7 H2. threat_below = player_row_r AND enemy_row_{r+1} for r=1..7? 7 H2. Too many. Could aggregate: H2 above = sum over r of (player_row_r * enemy_row_{r-1})? Cannot product in one linear. But maybe use H1 AND gates for each pair? H1 AND over input groups could compute player_row_r AND enemy_row_{r-1} if we make group_b enemy row presence? But group_b multiple inputs issue. Could make enemy row presence as a single input? No.
+
+Alternative: Use H1 threshold detectors for enemy in row above relative to player? Need relative, not possible without player coordinate. But maybe use absolute row policy: if enemy in top half, move down; if enemy in bottom half, move up. H1: enemy_top (rows 1-4), enemy_bottom (rows 5-8), enemy_left, enemy_right, gold_top, etc. H2 combine. Simpler.
+
+Policy idea:
+- If any enemy in top half (rows 1-4), prefer down (action 4) to move away? But if player already bottom, down may not help. But okay.
+- If any enemy in bottom half, prefer up.
+- If both, maybe no-op or fire? Could choose based on left/right.
+- If enemy in left half, prefer right; if right half, prefer left.
+- If gold in same half? Maybe move toward gold if no threat.
+Need output one action. Could set logits:
+base no-op high.
+If enemy_top: add to down.
+If enemy_bottom: add to up.
+If enemy_left: add to right.
+If enemy_right: add to left.
+If gold_top and no enemy_top? add up? etc.
+But H2 can just pass H1 features to output. We don't need H2 logic? Output can use H2 terms. H2 can be identity gates for features. 32 H2 enough.
+
+Need avoid terminal: enemies move horizontally. If enemy in same row ahead, moving vertical away is best. Global top/bottom may not align with player row. But maybe better than nothing.
+
+Could use player row detectors to improve. Let's explore feasible within 32 H1/H2.
+
+H1 units (32):
+1-8: player_row_r (r=1..8) threshold any player in row r. Since player channel one-hot, threshold 0.5.
+9-16: enemy_row_r (any enemy in row r). threshold 0.5.
+17-24: gold_row_r (any gold in row r). threshold 0.5.
+25: enemy_left (any enemy x<5? columns 0-4)
+26: enemy_right (columns 5-9)
+27: gold_left
+28: gold_right
+29: enemy_top (rows 1-4)
+30: enemy_bottom (rows 5-8)
+31: gold_top
+32: gold_bottom
+That's 32. Good.
+
+H2 units (32): Need combine to actions. We can create H2 units for desired action scores:
+- h2_down: if enemy above player? Could use enemy_row_{r-1} AND player_row_r. But need 7 ANDs. Could approximate with linear: sum over r of (player_row_r + enemy_row_{r-1})? Not AND. But H2 can implement AND for one pair. Could create 7 H2 for above pairs, 7 for below pairs, 8 same? Too many. But maybe use H2 to aggregate row-specific threats using signed sums? Let's think.
+
+We have H1 binary player_row and enemy_row. We want threat_above = OR_r player_row_r & enemy_row_{r-1}. Since player_row is one-hot, threat_above = enemy_row_{player_row-1}. This is a lookup. Can a single H2 linear over H1 compute this? It would need output +1 if enemy in row p-1. Linear sum w_r enemy_row_r + v_r player_row_r + bias cannot select based on p. Unless weights depend on p? No. Need multiplicative interaction. H2 is one layer after H1, but H1 are binary; H2 linear cannot compute arbitrary lookup with 16 binary inputs? It can with threshold? H2 is tanh of linear, only one threshold, cannot OR of 7 ANDs. So need multiple H2 units for each interaction or H1 interactions.
+
+Could create H1 interaction units using add_h1_and_gate over input groups: player row r group (10 cells) and enemy row r-1 group (10 cells). False positive if multiple enemies in row. But maybe acceptable? We can reduce false positives by using enemy row presence? Not possible. Could use group_b as a single representative cell? No, enemy can be any column. Could use trail? no.
+
+Maybe use H1 threshold with negative weights to detect "player row r and enemy row r-1"? Since inputs binary, a linear threshold can implement AND of ORs? For group A (player row r) exactly one active if true; group B (enemy row r-1) at least one active. We want 1 if A and B. Linear: sum_A x + sum_B x - 1.5. If A true and B true with k_B>=1 => >=2-1.5=0.5 positive. If A false, B true with k_B could be up to 8 => 8-1.5 positive false. If A true, B false =>1-1.5 negative. So false if B has >=2. Could set threshold higher, e.g., bias - (1 + maxB?) But if B true with k_B=1 and A true sum=2; if B false A true sum=1. Need threshold between 1 and 2, e.g., 1.5. False if B only and k_B>=2. Could limit group_B to at most one active by using a channel that is one-hot per row? Enemy row can have multiple. Could use trail? no. Could use enemy row but maybe multiple enemies in same row common (8 slots, rows 1..8, one per slot? Actually each entity has y=slot+1, so at most one entity per row! Wait entities list length 8, each slot has y=slot+1. So each row 1..8 has at most one entity. Yes! Because slot determines row. So enemy_row_r has at most one enemy. Gold also at most one per row. Great. Then group_B at most one active. So H1 AND over input groups works: if both groups active, sum=2 gain; if only B active, sum=1 gain; bias -1.5 gain => negative. If only A active, sum=1 gain. Perfect. Since at most one entity per row. Good.
+
+Thus we can create H1 AND units for interactions between player row r and enemy row s. But H1 dim 32, we already used 32 for detectors. Need allocate. Could instead use H1 for interactions directly, not all detectors. H2 can combine H1 interactions. Need output actions.
+
+We can design H1 units as relative threat detectors:
+For each player row r (1..8), detect enemy in same row r: AND player_row_r inputs and enemy_row_r inputs. 8 units.
+Detect enemy in row above r-1: for r=2..8 (7 units).
+Detect enemy in row below r+1: for r=1..7 (7 units).
+Total 22 H1. Also gold interactions maybe:
+- gold same row: 8? too many. Maybe gold above/below? We can use fewer.
+Need also horizontal direction? For same row enemy, need move up/down. Which direction? If enemy above/below? Same row threat: choose up or down based on player row? If player row >1, maybe up; else down. Could use H1 player row top/bottom. Or use enemy horizontal position: if enemy left, move right? But same row, vertical dodge. Could choose up if player row >4 else down. Need H1 for player row top/bottom.
+
+Maybe H1 units:
+1-8: enemy_same_r = player_row_r AND enemy_row_r (8)
+9-15: enemy_above_r = player_row_r AND enemy_row_{r-1} for r=2..8 (7)
+16-22: enemy_below_r = player_row_r AND enemy_row_{r+1} for r=1..7 (7)
+23: player_top = player row 1 or 2? threshold over player rows 1-2.
+24: player_bottom = player row 7 or 8.
+25: enemy_left_global? maybe any enemy x<5 (threshold)
+26: enemy_right_global
+27: gold_same? maybe any gold in player row? Need AND player row and gold row. Could create 8? Too many. Maybe one H1 gold_near? Use threshold over gold channel? Not relative.
+28: gold_top_global
+29: gold_bottom_global
+30: enemy_top_global
+31: enemy_bottom_global
+32: maybe no-op safe? Not needed.
+
+But H1 AND units require input groups. add_h1_and_gate(name, group_a_indices, group_b_indices, gain). group_a player row r: all 10 cells in row r channel 0. group_b enemy row s: all 10 cells in row s channel 1. Since at most one enemy per row, works. For gold, channel 2.
+
+H2 units: Need combine H1 to action logits. We can create H2 units for action scores:
+- h2_up: if enemy_below (any) or enemy_same and player_top? Actually if enemy below, move up. If enemy same row and player not top, move up? If enemy above, move down.
+- h2_down: if enemy_above or enemy_same and player_bottom.
+- h2_left: if enemy_right? maybe if enemy same row and enemy to right? Need horizontal relative. Could use global enemy_right to move left. But if enemy in right half, moving left may be away. If enemy in left half, move right.
+- h2_right: if enemy_left.
+- h2_noop: if no threats or gold? 
+- h2_fire: maybe never.
+
+H2 can OR multiple H1 by summing positive weights and bias. For binary H1 ±1? H1 AND outputs tanh(gain*(...)) approx +1 if true, -1 if false. Note false is -1, not 0. This is important. H2 linear over H1 with positive weights will get negative contributions from false units. If we sum many H1, false -1 can dominate. Need design with bias to account. For OR of k binary ±1 units, output = tanh(sum w_i h_i + bias). If all false: -k*w + bias. If one true: (k-1)*(-w)+w + bias = bias - (k-2)w. To make true positive and false negative, need bias > (k-1)w and bias < (k-1)w? Let's derive. For k units, true count t. Sum = w*(t - (k-t)) = w*(2t-k). Need threshold 0. For t=0: -wk + b <0 => b < wk. For t=1: w(2-k)+b >0 => b > w(k-2). For k>2, possible if k-2 < k, yes choose b = w(k-1). Then t=0: -w <0; t=1: w>0. Good. So OR of k ±1 units: weights w, bias w*(k-1). Then output + if at least one true. Good.
+
+For AND of k units: need t=k positive, t=k-1 negative. Sum = w(2t-k). t=k: wk+b>0; t=k-1: w(k-2)+b<0 => b < -w(k-2) and b > -wk. choose b=-w(k-1). Then t=k: w>0; t=k-1: -w<0. Good.
+
+But H2 units can have different weights. We can use helper add_h2_gate with h1_terms and bias. Need account ±1.
+
+Alternatively use H2 muxPass? It passes signal when gate positive. But we can just create action score H2 units as ORs.
+
+Need output logits. We can set H2 action score units to +1 if condition, -1 otherwise. Then output rules: for action, h2_terms {score: 20}, output_bias -10. If score +1 => 10, if -1 => -30. Good. But if multiple action scores active, choose highest. Need priority. Could set weights different: survival actions higher than gold. Or use H2 priority units.
+
+Simpler: Create H2 units:
+- score_down: OR(enemy_above units, enemy_same & player_bottom?) But enemy_same & player_bottom requires AND of H1 enemy_same_r and player_bottom. H2 can AND two H1 units: terms {enemy_same_r: w, player_bottom: w}, bias -w*(2-1)? For AND of 2 ±1: weights w, bias -w. t=2: 2w-w=w>0; t=1:0? tanh(0)=0 not negative. Need bias -1.5w? For AND 2: t=2 sum=2w+b>0; t=1 sum=w+b<0 => b<-w and b>-2w; choose -1.5w. Then t=1 -0.5w negative. Good. For AND k: bias -w*(k-0.5)? General? For k=2, -1.5w. For k=1? not.
+But we can avoid AND by creating H1 units for enemy_same_bottom? Maybe H1 AND over player row bottom rows and enemy same? Hmm.
+
+Maybe create H1 units directly for action conditions:
+- need_down: player row r and enemy row r-1 (above) OR player row r in bottom and enemy row r (same). Could create H1 AND for each: above 7, same_bottom for r=7,8? 2. Total 9.
+- need_up: below 7, same_top for r=1,2? 2. Total 9.
+- need_left: player row r and enemy row r and enemy in right half? Need 3-way? Could use H1 AND of player row r, enemy row r, enemy right? group_a player row, group_b enemy row & right? add_h1_and_gate only two groups; group_b can be enemy row r right half cells (5 cells). If enemy in same row right half, both groups active. At most one enemy per row, so works. For each r, 8 units. Too many.
+Maybe horizontal global: if enemy_right_global, move left; if enemy_left_global, move right. No player row needed. Could create H1 threshold enemy_right (any enemy x>=5), enemy_left. 2 units.
+
+H1 budget:
+- above: 7
+- below: 7
+- same: 8? maybe for horizontal? or for vertical priority? Could use same to decide vertical if no above/below. Need same_top/bottom maybe.
+- player_top: threshold player rows 1-2 (1)
+- player_bottom: threshold player rows 7-8 (1)
+- enemy_left: threshold (1)
+- enemy_right: threshold (1)
+- gold_same? maybe 1? Could use threshold gold channel? Not relative.
+- gold_top/bottom? 2
+Total if same 8: 7+7+8+1+1+1+1+2=28. Good. Could add gold_left/right 2 =>30. Add enemy_top/bottom 2 =>32. Nice.
+
+But H1 AND units for above/below/same use add_h1_and_gate. Need group_a player row r (channel 0 row r). group_b enemy row s (channel 1 row s). For same, s=r. For above, s=r-1 (player row r, enemy row above). For below, s=r+1.
+
+Rows: environment y 1..8. In grid rows 0..9. Player row r from 1 to 8. Enemy rows 1..8. We'll use 0-based row index in grid: r=1..8.
+
+H1 names:
+above_2 ... above_8? For player row r, enemy row r-1. r=2..8 => 7.
+below_1 ... below_7 => 7.
+same_1 ... same_8 => 8.
+player_top: threshold over player channel rows 1,2? Maybe row 1 and 2. player_bottom rows 7,8.
+enemy_left: threshold over enemy channel columns 0..4 all rows? But enemy only rows 1..8. Use all rows 0..9 maybe. enemy_right columns 5..9.
+gold_top: threshold gold rows 1..4. gold_bottom rows 5..8.
+Maybe gold_left/right? Could use for seeking gold. But survival priority.
+
+H2 units (32): Need action scores.
+We can create:
+- h2_down: OR of above units (7) plus same_bottom? same_bottom condition: same_r and player_bottom. Could create H2 AND for same_7 & player_bottom, same_8 & player_bottom. But H2 unit can only one linear; to OR multiple ANDs need multiple H2 or H1. Could instead create H1 units same_bottom_7, same_bottom_8 using add_h1_and_gate? group_a player row r? group_b enemy row r? But need also player_bottom. 3-way not possible. But player_bottom is OR of player row 7/8. For same_7 and same_8, if same_7 true then player row 7 (bottom) automatically. same_8 true player row 8. So same_bottom = same_7 OR same_8. No extra AND. Good. Similarly same_top = same_1 OR same_2.
+So h2_down = OR(above_2..above_8, same_7, same_8). k=9. Use weights 1, bias 8? For OR k: bias w*(k-1)=8. If all false: -9+8=-1; if one true: 9? Wait sum = 2t-k. For k=9, t=1: -7 +8=1 positive. Good.
+- h2_up = OR(below_1..below_7, same_1, same_2). k=9.
+- h2_left = OR(enemy_right) maybe plus? If enemy_right true, move left. k=1: OR of 1: weight 1, bias 0? For k=1, t=1 sum=1+b>0, t=0 -1+b<0 => b=0 works. So h2_left = enemy_right.
+- h2_right = enemy_left.
+- h2_noop: maybe if no vertical threat and no horizontal threat? Could be default. We can just output_bias no-op high. But if no threats, all action scores -1, logits: no-op -10, others -30. Good. No need h2_noop. But if gold seeking, maybe add.
+- h2_gold_up: if gold_top and no enemy_top? Need AND/NAND. Could create H2: gold_top AND NOT enemy_top? H1 enemy_top maybe. For AND with NOT: terms {gold_top: w, enemy_top: -w}, bias? H1 ±1. Want + if gold_top=+1 and enemy_top=-1. Sum = w*1 + (-w)*(-1)=2w + b. If gold_top true enemy_top true: w - w=0+b. Need negative. If gold_top false enemy_top false: -w + w=0+b. Need negative. If gold_top false enemy_top true: -w - w=-2w+b. Choose b=-w? Then true/false? desired: 2w-w=w positive; conflict: 0-w=-w negative. Good. So h2_gold_up = AND(gold_top, NOT enemy_top) with terms gold_top:1, enemy_top:-1, bias:-1. But if enemy_top false (-1), gold_top true (+1): 1+1-1=1. If gold_top false, enemy_top false: -1+1-1=-1. Good.
+- h2_gold_down: gold_bottom AND NOT enemy_bottom.
+- h2_gold_left: gold_left AND NOT enemy_left? Need gold_left H1. We didn't include maybe. Could include gold_left/right if budget.
+- h2_fire: never.
+
+But output priority: survival vertical/horizontal should dominate gold. We can set output weights: vertical/horizontal score weight 30, gold score weight 10, output_bias -10. If survival score -1 => -40, gold +1 => 0, no-op -10. If no survival, gold can make logit 0 > -10. If survival active, logit 20. Good. But if both up and down active (enemy above and below), both 20; tie. Could add priority: down weight 30, up 28? Or use H2 priority. Not critical.
+
+Need ensure H2 OR with many units and bias works with tanh saturation. H1 AND units output approx +1/-1 with gain 20. Good. H2 tanh of small ±1 maybe not saturated but enough. Output weights can amplify.
+
+Need consider H1 threshold units for player_top etc. They output +1 if any player in rows. Since player one-hot, threshold 0.5 gain 10. Good. enemy_left threshold: any enemy in left columns. Could be multiple enemies across rows, threshold 0.5. If any, +1. Good.
+
+Need consider H1 AND gate false positives due to group sizes. add_h1_and_gate: weights gain for each input in group_a and group_b, bias -1.5 gain. If group_a player row r: 10 inputs, exactly one active if player in row. group_b enemy row s: 10 inputs, at most one active (since one entity per row). If both active: sum=2gain, bias -1.5gain => 0.5gain => tanh positive. If only group_a: 1gain-1.5gain=-0.5gain negative. If only group_b: -0.5gain. If group_b could have multiple? At most one per row, yes. But what about gold? not using AND for gold. Good.
+
+Need map input indices. Observation shape (10,10,6) row-major: idx = (r*10 + c)*6 + channel. Channels: 0 player, 1 enemy, 2 gold, 4 trail. We'll use channel 0,1,2.
+
+Need build program with h1_dim=32, h2_dim=32. Need count H1 exactly <=32. Let's plan H1 list:
+1 above_2: player row 2, enemy row 1
+2 above_3: p3 e2
+3 above_4: p4 e3
+4 above_5: p5 e4
+5 above_6: p6 e5
+6 above_7: p7 e6
+7 above_8: p8 e7
+8 below_1: p1 e2
+9 below_2: p2 e3
+10 below_3: p3 e4
+11 below_4: p4 e5
+12 below_5: p5 e6
+13 below_6: p6 e7
+14 below_7: p7 e8
+15 same_1: p1 e1
+16 same_2: p2 e2
+17 same_3: p3 e3
+18 same_4: p4 e4
+19 same_5: p5 e5
+20 same_6: p6 e6
+21 same_7: p7 e7
+22 same_8: p8 e8
+23 player_top: threshold player rows 1,2 (maybe row 1 and 2)
+24 player_bottom: threshold player rows 7,8
+25 enemy_left: threshold enemy cols 0-4 rows 1-8? Could include all rows 0-9.
+26 enemy_right: threshold enemy cols 5-9 rows 1-8.
+27 enemy_top: threshold enemy rows 1-4 all cols.
+28 enemy_bottom: threshold enemy rows 5-8 all cols.
+29 gold_top: threshold gold rows 1-4.
+30 gold_bottom: threshold gold rows 5-8.
+31 gold_left: threshold gold cols 0-4 rows 1-8.
+32 gold_right: threshold gold cols 5-9 rows 1-8.
+Total 32. Good.
+
+Do we need player_top/bottom? Maybe not if using same_1/2 and same_7/8. But could use for horizontal? Maybe not. We can keep.
+
+H2 units plan (<=32):
+1 h2_down: OR above_2..above_8 (7) + same_7 + same_8 (2) => k=9. terms weight 1 each, bias 8.
+2 h2_up: OR below_1..below_7 (7) + same_1 + same_2 => k=9, bias 8.
+3 h2_left: enemy_right (k=1, bias 0)
+4 h2_right: enemy_left
+5 h2_gold_up: gold_top AND NOT enemy_top: terms {gold_top:1, enemy_top:-1}, bias -1.
+6 h2_gold_down: {gold_bottom:1, enemy_bottom:-1}, bias -1.
+7 h2_gold_left: {gold_left:1, enemy_left:-1}, bias -1.
+8 h2_gold_right: {gold_right:1, enemy_right:-1}, bias -1.
+9 maybe h2_noop: OR of no threats? Could create NOT of any threat? Hard. Default no-op via bias.
+10 maybe h2_fire: never.
+Could add h2_safe_noop: if no enemy? H1 enemy_any? We don't have enemy_any. Could create from enemy_left OR enemy_right OR enemy_top OR enemy_bottom? But not needed.
+
+Need output rules:
+output_bias = [-10, -10, -10, -10, -10, -10]
+Action 0 no-op: maybe h2_terms {}? If no terms, logit -10. But if we want no-op when no action scores, okay. Could add h2_noop? Not necessary.
+Action 1 left: h2_terms {h2_left: 30, h2_gold_left: 10}
+Action 2 up: {h2_up: 30, h2_gold_up: 10}
+Action 3 right: {h2_right: 30, h2_gold_right: 10}
+Action 4 down: {h2_down: 30, h2_gold_down: 10}
+Action 5 fire: maybe {} or {h2_fire: 0}. Keep -10.
+But if h2_up and h2_down both -1, left/right -1, gold -1, logits: left -40, up -20? Wait up: 30*(-1)+10*(-1)=-40? Actually gold_up also -1 if no gold/no enemy? Let's compute h2_gold_up when gold_top false, enemy_top false: -1+1-1=-1. So up logit = -30 -10 = -40. No-op -10. Good.
+If h2_up +1, gold_up maybe -1: up=30-10=20. Good.
+If h2_up +1 and gold_up +1: 40. Good.
+If h2_left +1, gold_left -1: 20.
+If no survival but gold_up +1: up= -30? Wait h2_up false -1 => -30, gold_up +1 => +10, total -20. No-op -10, so no-op still higher. That's bad: gold seeking won't override no-op because survival score false contributes -30. We need output design to allow gold when no survival. If action score false is -1, it penalizes. We could set survival terms weight 0 when false? Not possible. Could use H2 units that output 0 when false? Tanh can't exactly 0 unless bias 0 and no terms? But H2 with OR has false -1. We can create H2 "active" units that are +1 if condition, 0 if false? With tanh, can approximate 0 by setting bias such that false z=0. For OR of k ±1, false z = -k w + b. Set b = k w => false 0, true t=1 z = w(2-k)+k w = 2w >0. But if k>1, t=1 positive, t=0 zero. Good! For OR, choose bias = k*w, not (k-1)w. Then false 0, true positive. For k=1, bias=1: false 0, true 2. For AND of 2, want false 0? AND: t=2 z=2w+b, t=1 z=w+b, t=0=-w+b. To make t<2 zero? Can't make both t=1 and t=0 zero with one bias. But for OR we can make false 0. Then output false survival doesn't penalize. Great.
+
+Use OR H2 with bias = k*w. Then h2_down false 0, true tanh(2w?) Let's derive: h1 ±1. Sum = w(2t-k). bias = k w. z = 2w t. t=0 =>0, t>=1 => >=2w. With w=1, true tanh(2)=0.96. Good. For k=9, false exactly 0 (floating). Good.
+
+For h2_left = enemy_right: k=1, bias=1 => false 0, true tanh(2). Good.
+
+For gold AND NOT: We want false 0, true positive. Condition A=+1, B=-1. H1 ±1. z = wA*A + wB*B + b. Choose wA=1, wB=-1. Cases:
+A=+1,B=-1 desired: 1+1+b =2+b.
+A=+1,B=+1: 1-1+b=b.
+A=-1,B=-1: -1+1+b=b.
+A=-1,B=+1: -1-1+b=-2+b.
+Set b=0? desired 2, conflicts 0, -2. Good false 0 for two cases, negative for one. So bias 0. Then false can be 0 or -2. Good. Output false not positive. Great.
+
+Then output_bias can be 0? If all false, logits 0 for all actions? If no terms? For actions with terms false 0, logit 0. Uniform. Softmax uniform. Could set output_bias -10 for no-op? But if action terms false 0, logit -10. If gold true, logit +10. Good. If survival true, +30. Use output_bias = [-10]*6. But if action has no terms (fire) -10. No-op -10. If no conditions, all actions with terms false 0 => -10, fire -10, uniform. Fine. If gold true, up -10+10=0, others -10, chooses up. If survival true, up -10+30=20. Good.
+
+Need ensure H2 OR false exactly 0 with bias k. But H1 false may not be exactly -1 due to tanh saturation? With gain 20, false z=-0.5*20=-10 => tanh(-10) ~ -0.9999999959. Not exact. H2 false z = sum w*h1 + k. For k units, if all false ~ -k*0.999999996 + k = ~4e-9 positive? Actually -0.9999999959*k + k = 4.1e-9*k positive tiny. tanh ~ 3.7e-8. Output weight 30 => 1e-6, negligible. Good. If H1 true tanh(10)=0.9999999959. True z ~2. Good.
+
+For H1 AND gate: true z=0.5*gain=10, false z=-10. Good.
+
+For H1 threshold detectors: true if sum > threshold. For player_top rows 1,2: if player in row 1 or 2, sum=1, threshold 0.5, gain 10 => z=5 => +1. If false sum=0 => z=-5 => -1. Good. enemy_left: if any enemy left, sum>=1, threshold 0.5 => +1; false -1. If multiple enemies left, sum>1, z>5, still +1.
+
+H2 OR with k terms: Need list terms. For h2_down k=9. bias=9. If one true: z = (8*(-1)+1) +9 =2? Wait using ±1: sum = -8+1=-7; +9=2. Good. If all false: -9+9=0. If multiple true: >2. Good.
+
+H2 gold AND NOT: terms {gold_top:1, enemy_top:-1}, bias 0. If gold_top true (+1), enemy_top false (-1): z=1+1=2. If gold_top false, enemy_top false: -1+1=0. If gold_top true, enemy_top true: 1-1=0. If gold_top false, enemy_top true: -1-1=-2. Good.
+
+Output rules: If h2 false 0, logit bias -10. If true ~1, weight 30 => 20. Good.
+
+Need consider previous action repeated with prob 0.1. Stateless okay.
+
+Could improve policy: If enemy same row, vertical away. Our h2_down includes same_7/8 (if player bottom, move down? Wait if enemy same row and player bottom, moving down may be toward bottom boundary but away from enemy? Enemy same row, vertical direction arbitrary. If player row 7/8, down is toward bottom, up is toward center. Which is safer? If enemy same row, moving up or down both leave row. If player bottom, up moves to row 6, down to row 8 (if row7) or stays row8 (if row8). Down may be less safe if enemy below? But same row. Maybe choose up for same row generally, except if enemy below? Our h2_down includes same_7/8, h2_up includes same_1/2. For middle same rows 3-6, no vertical action from same. That's bad: if enemy same row middle, no vertical dodge, only horizontal global. We need handle same row for all rows. Could choose up for same row if player not top, down if top? Or alternate. Need H2 can OR same units to one action. We can set h2_up includes all same_1..same_8? Then if same row, move up. But if player row 1, up stays row1 (max 1), not leave row. For row1, down better. So h2_down include same_1, h2_up include same_2..same_8? If player row 8, up leaves row, good. If row1, down leaves. So:
+- h2_down = OR(above_2..above_8, same_1) maybe also if enemy above. k=8.
+- h2_up = OR(below_1..below_7, same_2..same_8) k=14? 7+7=14. bias 14. That's okay. But if enemy below and same row both, up. If enemy above and same row? above and same cannot both? Enemy one per row, player one row, could have enemy above and same? Yes different rows, both true. Then h2_down and h2_up both active. Tie. Could priority: if enemy above, down; if enemy below, up; if same, up except row1 down. If both above and below, maybe choose based on horizontal? Tie okay.
+
+But h2_up with 14 terms, false 0, true 2. Good. H2 dim enough.
+
+What about enemy above: if player row 2 and enemy row1, down. If player row 8 and enemy row7, down (toward bottom) maybe away? Enemy above, moving down increases distance, good. Enemy below, moving up. Same row: move up except top. Good.
+
+Horizontal: If enemy in same row and to left/right, moving vertical is better. Our vertical active. If no vertical (enemy not in adjacent/same row), horizontal global may move away from side with enemies. Good.
+
+Gold seeking: If no survival, move toward gold half. But if gold top and enemy top, no gold_up. If gold top and enemy bottom, gold_up active, move up. Good.
+
+Need maybe avoid moving into enemy in adjacent row? If enemy above, down; if enemy below, up. Good.
+
+Could use trail channel to predict? Not necessary.
+
+Need ensure H1 AND groups: For above_r, group_a player row r, group_b enemy row r-1. If player row r and enemy row r-1, true. If enemy row r-1 has entity, at most one. Good.
+
+Potential issue: add_h1_and_gate uses group_a_indices and group_b_indices; if an input index appears in both groups? For same row, group_a player channel row r, group_b enemy channel row r, different channels so no overlap. Good.
+
+Need generate input index lists. We can write helper inside build_policy:
+def idx(r,c,ch): return (r*10+c)*6+ch
+def row_cells(r,ch): return [idx(r,c,ch) for c in range(10)]
+def rect_cells(r0,r1,c0,c1,ch): ...
+Use prog.add_h1_and_gate(name, row_cells(r,0), row_cells(s,1), gain=20.0)
+For threshold: prog.add_h1_threshold(name, {i:1.0 for i in cells}, threshold=0.5, gain=10.0)
+Need ensure H1 count 32. We can maybe not use player_top/bottom if not used. But we allocated. Could use them for something? Maybe not. Unused H1 okay? It will be compiled, output -1 always? player_top used? We can use in H2? Maybe not. Unused H1 with threshold will be -1 if false, +1 if true. It doesn't affect output if not referenced. Fine. But H1 dim 32, okay. Could remove player_top/bottom and add more useful H1? We have 32 exactly with gold left/right. If we don't use player_top/bottom, still okay. But maybe use player_top/bottom to improve same row: h2_down include same_1 OR player_top? Not needed. Could use player_top to move down if enemy same and top? same_1 already. player_bottom maybe move up if same bottom? same_8 included in up. Good.
+
+Maybe use player_top/bottom for horizontal? If enemy_left and player_top? no.
+
+Could replace player_top/bottom with enemy_any? But not needed.
+
+Need H2 count. We'll create 8 H2. Unused H2 okay. But H2 units false 0? Unused H2 default no terms bias 0 => tanh(0)=0. Output not reference. Fine.
+
+Need output_bias. In MLPProgram, output_bias Optional[List[float]]. Set prog.output_bias = [-10.0]*6. Then set_output_action without bias. Compile: b3 set to -10, then W3 terms. Good.
+
+Need ensure set_output_action h2_terms references existing H2 names. Yes.
+
+Potential issue: H2 OR with bias k and terms weight 1. If k=14, false z ~0, true z=2. But if H1 false not exactly -1, false z positive tiny. Output logit -10 + 30*tanh(tiny) ~ -10. Good.
+
+Potential issue: H1 threshold for enemy_left with multiple enemies: true z = gain*(sum -0.5). If sum=8, z=75, tanh 1. Good.
+
+Potential issue: H1 AND gate with group_a player row: player channel has exactly one active in row 1..8. What if player at row 0 or 9? Environment restricts y 1..8, reset 5. So okay. If player row not in 1..8? no.
+
+Potential issue: Entities can be None, enemy channel may have at most one per row, but gold channel also at most one per row. Enemy and gold can be in same row? Yes entity is either gold or enemy, so at most one entity per row, but enemy channel and gold channel mutually exclusive per row. Good.
+
+Potential issue: Trail channel not used.
+
+Need maybe action 5 fire? In env fire no effect. Avoid.
+
+Could there be reward for collecting gold by moving into it. Our gold seeking moves toward gold half, but if gold in same row? We only have gold_top/bottom/left/right global. If gold top, move up; if gold bottom, move down; if gold left, move left; if gold right, move right. But if gold top and enemy top, no gold. If gold top and enemy bottom, move up. Might collect. If gold in same row left/right, horizontal gold action may move toward. But if enemy same row, vertical survival overrides. Good.
+
+But output priority: survival weight 30, gold 10. If survival false 0, gold true 10 => logit 0 vs no-op -10. Good. If survival true 30, gold false 0 => 20. If survival true and gold true same action =>40. If survival true opposite action: e.g., h2_up true, h2_gold_down true. Up logit 20, down logit -10+10=0, chooses up. Good.
+
+Need consider if both h2_up and h2_down true (enemy above and below). Both logit 20. Tie. Softmax uniform between up/down. Could add slight priority: down weight 31, up 30? Or use output_bias? We can set down weight 32, up 30. But if both, down slightly. Is down better? Maybe if enemy above and below, choose based on player row? Not available. Could use player_top/bottom H2? We have H1 player_top/bottom. Could create H2 priority units:
+- h2_down_priority = h2_down AND player_bottom? Not needed.
+Maybe set down weight 31, up 30, left 29, right 28? But survival all should dominate gold. Slight differences okay. If both up/down, down chosen. If both left/right, left chosen. Fine.
+
+But if h2_down true due to enemy above, and h2_up true due to enemy below, down maybe not always best. But arbitrary.
+
+Could create H2 units for "vertical_threat" and use player_top/bottom to choose? For same row middle, we choose up. For above/below, choose away. If both, maybe choose direction with more space: if player_top, down; if player_bottom, up. We can implement H2:
+- h2_down = OR(above, same_1, below? no) AND? Hmm.
+Maybe use H2 to combine h2_down_raw and player_top? But H2 can only one layer; we can create final action score H2 from H1, not from other H2. We have H2 dim 32, could create intermediate H2? Output can reference any H2, but H2 units cannot reference H2, only H1. So no multi-layer H2. Could create H1 interactions for priority.
+
+Not necessary.
+
+Need ensure code is syntactically correct. Need include function build_policy():
+    prog = MLPProgram(input_dim=600, h1_dim=32, h2_dim=32, output_dim=6, activation="tanh")
+    ...
+    return MLPCompilerBackend.compile(prog)
+
+Need maybe import? If code block only function, assume MLPProgram and MLPCompilerBackend in namespace. Could include from .ir import MLPProgram? The backend code has from .ir import MLPProgram. In final, maybe just function. User says use following IR and backend. Return one complete Python code block defining build_policy(). I can include no imports. But to be safe, include imports? If they execute in environment where MLPProgram and MLPCompilerBackend defined, imports may fail if relative. Better not import. Just reference.
+
+Need maybe use prog.add_spatial_coord_extractor? Not necessary.
+
+Let's detail H1 creation.
+
+Helper:
+def cell(r,c,ch): return (r*10+c)*6+ch
+def row(r,ch): return [cell(r,c,ch) for c in range(10)]
+def rect(r0,r1,c0,c1,ch):
+    out=[]
+    for r in range(r0,r1+1):
+       for c in range(c0,c1+1): out.append(cell(r,c,ch))
+    return out
+
+H1 AND:
+for r in range(2,9): # 2..8
+    prog.add_h1_and_gate(f"above_{r}", row(r,0), row(r-1,1), gain=20.0)
+for r in range(1,8): #1..7
+    prog.add_h1_and_gate(f"below_{r}", row(r,0), row(r+1,1), gain=20.0)
+for r in range(1,9):
+    prog.add_h1_and_gate(f"same_{r}", row(r,0), row(r,1), gain=20.0)
+Count 7+7+8=22.
+
+Thresholds:
+# player_top rows 1,2
+prog.add_h1_threshold("player_top", {i:1.0 for i in rect(1,2,0,9,0)}, threshold=0.5, gain=10.0)
+# player_bottom rows 7,8
+prog.add_h1_threshold("player_bottom", {i:1.0 for i in rect(7,8,0,9,0)}, threshold=0.5, gain=10.0)
+# enemy_left rows 1..8 cols 0..4
+prog.add_h1_threshold("enemy_left", {i:1.0 for i in rect(1,8,0,4,1)}, threshold=0.5, gain=10.0)
+# enemy_right cols 5..9
+prog.add_h1_threshold("enemy_right", {i:1.0 for i in rect(1,8,5,9,1)}, threshold=0.5, gain=10.0)
+# enemy_top rows 1..4
+prog.add_h1_threshold("enemy_top", {i:1.0 for i in rect(1,4,0,9,1)}, threshold=0.5, gain=10.0)
+# enemy_bottom rows 5..8
+prog.add_h1_threshold("enemy_bottom", {i:1.0 for i in rect(5,8,0,9,1)}, threshold=0.5, gain=10.0)
+# gold_top rows 1..4 channel 2
+prog.add_h1_threshold("gold_top", {i:1.0 for i in rect(1,4,0,9,2)}, threshold=0.5, gain=10.0)
+# gold_bottom rows 5..8
+prog.add_h1_threshold("gold_bottom", {i:1.0 for i in rect(5,8,0,9,2)}, threshold=0.5, gain=10.0)
+# gold_left cols 0..4
+prog.add_h1_threshold("gold_left", {i:1.0 for i in rect(1,8,0,4,2)}, threshold=0.5, gain=10.0)
+# gold_right cols 5..9
+prog.add_h1_threshold("gold_right", {i:1.0 for i in rect(1,8,5,9,2)}, threshold=0.5, gain=10.0)
+Total 10 thresholds, total 32.
+
+H2:
+# down: above_2..above_8 (7) + same_1 (1) = 8. Maybe also player_top? If player top and no above? no.
+down_terms = {f"above_{r}":1.0 for r in range(2,9)}
+down_terms["same_1"] = 1.0
+prog.add_h2_gate("h2_down", down_terms, bias=float(len(down_terms))) # bias 8
+# up: below_1..below_7 (7) + same_2..same_8 (7) =14
+up_terms = {f"below_{r}":1.0 for r in range(1,8)}
+for r in range(2,9): up_terms[f"same_{r}"]=1.0
+prog.add_h2_gate("h2_up", up_terms, bias=float(len(up_terms))) #14
+# left: enemy_right
+prog.add_h2_gate("h2_left", {"enemy_right":1.0}, bias=1.0)
+# right: enemy_left
+prog.add_h2_gate("h2_right", {"enemy_left":1.0}, bias=1.0)
+# gold up: gold_top and not enemy_top
+prog.add_h2_gate("h2_gold_up", {"gold_top":1.0, "enemy_top":-1.0}, bias=0.0)
+# gold down
+prog.add_h2_gate("h2_gold_down", {"gold_bottom":1.0, "enemy_bottom":-1.0}, bias=0.0)
+# gold left
+prog.add_h2_gate("h2_gold_left", {"gold_left":1.0, "enemy_left":-1.0}, bias=0.0)
+# gold right
+prog.add_h2_gate("h2_gold_right", {"gold_right":1.0, "enemy_right":-1.0}, bias=0.0)
+
+Check H2 OR bias = len terms. For h2_left k=1 bias=1. If enemy_right false (-1): z=0; true: 2. Good.
+
+But for h2_down, if above true and same_1 false etc: z=2. If all false: 0. Good.
+
+Potential issue: H1 same_1 true means player row1 and enemy row1. h2_down true, move down. Good. H1 same_2..8 true => h2_up true. If player row2 and enemy same, up to row1 (safe? row1 top, but leaves row). Good. If player row8 and enemy same, up to row7. Good.
+
+What if enemy above player row2 (row1) and same row2? impossible one enemy per row? Could have enemy row1 and enemy row2? Yes different rows, at most one per row, so both above_2 and same_2 true. h2_down and h2_up both true. Tie. If player row2, enemy above row1 and same row2, moving down away from both? Enemy same row, down to row3; enemy above row1, down increases distance. So down better. Our tie maybe down if weight higher. Set down weight 32, up 30. Good.
+
+What if enemy below and same, up better. If both, up maybe. We can set up weight 31, down 30? Need priority context. Could use player_top/bottom to break: if player_top, down; if player_bottom, up. We can create H2 final scores with terms including player_top/bottom? But H2 linear can't multiply h2_down by player_top. But we can create H1 interactions for down_priority? Maybe not.
+
+Simpler set down weight 31, up 30. If both, down. But if player bottom and both, up might be better. Not critical.
+
+Could create H2 units:
+- h2_down = OR(above, same_1, below? no)
+- h2_up = OR(below, same_2..8)
+- h2_down_top = h2_down AND player_top? But H2 can AND H1: terms {h2_down? no H2 cannot reference H2}. Could create H1 down_raw? We have H1 above/same. To make down only if player_top? Need H1 interactions. Not worth.
+
+Output weights:
+prog.output_bias = [-10.0]*6
+prog.set_output_action(0, {}) # no-op
+prog.set_output_action(1, {"h2_left":30.0, "h2_gold_left":10.0})
+prog.set_output_action(2, {"h2_up":30.0, "h2_gold_up":10.0})
+prog.set_output_action(3, {"h2_right":30.0, "h2_gold_right":10.0})
+prog.set_output_action(4, {"h2_down":31.0, "h2_gold_down":10.0})
+prog.set_output_action(5, {})
+Maybe left/right weights 29/28 to prioritize vertical? If enemy left/right global but no vertical, horizontal. If vertical and horizontal both, vertical should dominate. Set vertical 32/31, horizontal 20? But horizontal survival also important. If enemy in same row, vertical active; horizontal global may also active. Vertical weight higher. If enemy not adjacent row but left/right, horizontal active. Good.
+Set:
+left: h2_left 25, gold_left 10
+up: h2_up 32, gold_up 10
+right: h2_right 25, gold_right 10
+down: h2_down 32, gold_down 10
+If both up/down, tie 32. Could set down 33. But if both, arbitrary. Let's set down 33, up 32. Horizontal 25. Gold 10.
+No-op -10. If no conditions, all -10. If gold only, action 0. If survival horizontal only, 15? Wait h2_left true ~1, weight25 => logit 15. Good.
+
+Need consider H2 gold AND NOT false can be 0 or negative. If negative, logit -20, okay. If gold true but survival false, logit 0. Good.
+
+Could there be case h2_up false 0, h2_gold_up true 1, up logit 32*0+10=10? Wait output_bias -10, so 0. Actually -10+10=0. No-op -10. Good.
+
+Need ensure H2 false exactly 0? For OR bias len, if H1 false -1, z=0. But H1 threshold false is tanh(-5)=-0.999909, not exactly -1. For h2_left with enemy_right false: z = -0.999909 +1 = 9.05e-5, tanh ~9e-5, output weight 25 => 0.00225, logit -9.99775. Fine. For h2_up with 14 false: z ~14*9e-5=0.00126, output 32 =>0.04, logit -9.96. Still below no-op -10? Actually -9.96 > -10, so all action logits slightly above no-op, but uniform-ish. No-op -10. If no conditions, actions with terms have -9.96, fire -10. Softmax slightly favors actions over no-op. Not a big issue. But if we want no-op default, could set output_bias -20 and weights? Then false tiny positive still maybe -19.96, no-op -20. Uniform. Fine.
+
+Could set H1 threshold gain higher to make false closer -1. gain=20 for thresholds? True z=10, false -10. Use gain=20 for all thresholds. Then false tanh(-10) ~ -0.9999999959, H2 false z ~4e-9, output negligible. Let's set threshold gain=20.0. For player_top true sum=1 threshold .5 => z=10. Good. For enemy_left multiple sum up to 8 => z=150, saturates. Good.
+
+H1 AND gain=20. Good.
+
+H2 OR bias len. With H1 false -0.9999999959, false z ~5.7e-9*14=8e-8, output negligible.
+
+Need maybe H2 gold AND NOT false cases: if gold_top false, enemy_top false: z = -0.9999999959 + 0.9999999959 = 0 exactly? They may be same value if both threshold false with same gain? gold_top false z=-10, enemy_top false z=-10, tanh same, sum 0. If one false due to different sums? enemy_top false sum=0, gold_top false sum=0, same. Good. If gold_top false, enemy_top true: -1 -1 = -2. Good.
+
+Need maybe use trail channel to detect enemy behind? Not needed.
+
+Could policy be too simple? The prompt likely from benchmark expecting any valid policy. Need ensure no training. Good.
+
+But let's think if there are hidden requirements: "Design a policy from scratch, no training, no forward pass, no rollouts, no feedback, no code execution. Use only this prompt and, if instructed, the NeuralCompiler IR and backend. Output a complete Python function build_policy() that returns an ExecutableMLP of architecture 600 -> 32 -> 32 -> 6 with tanh activations. The network sees a 10x10x6 grid flattened in row-major order, logits actions 0=no-op, 1=left, 2=up, 3=right, 4=down, 5=fire. Actions are sampled by softmax; with probability 0.1 the previous action is repeated. Episodes end at terminal or 10000 steps. Source of the environment (NumPy as np) and six-channel observation wrapper follows. Make a single attempt without testing.
+
+Use the following NeuralCompiler IR and backend to build a policy. Return one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program). Do not train, test, run model forward passes or use feedback."
+
+Need maybe they will execute build_policy in environment with np, MLPProgram, MLPCompilerBackend. Our code should not call forward. Good.
+
+Need maybe "if instructed, the NeuralCompiler IR and backend" means we can use it. Good.
+
+Potential issue: MLPProgram.add_h1_threshold expects input_weights Dict[int,float]. We pass dict comprehension. Good.
+
+Potential issue: add_h1_and_gate group_a_indices and group_b_indices are List[int]. We pass lists. Good.
+
+Potential issue: H1 unit names must be unique. Yes.
+
+Potential issue: H2 unit names unique. Yes.
+
+Potential issue: output_rules h2_terms names exist. Yes.
+
+Potential issue: output_bias list length 6. Yes.
+
+Potential issue: set_output_action with empty h2_terms and no bias. It will append rule with empty terms. Compile loops no terms, no bias. b3 remains output_bias. Good.
+
+Potential issue: If output_bias is not None, b3[:] = np.array(...). Then rules with bias overwrite. We don't use bias in rules. Good.
+
+Need maybe include type hints? Not necessary.
+
+Let's consider if H1 AND gate with group_a row(r,0) includes 10 inputs. Player channel has exactly one active in row r if player there. But what about player channel in row 0 or 9? Not used. If player not in row r, group_a sum 0. Good. group_b enemy row s includes 10 inputs. At most one enemy in row s, but could there be enemy and gold in same row? No, entity either. But enemy channel only enemies. At most one. Good.
+
+What about entities list: slot_options can choose any None slot, y=slot+1. So at most one per row. Yes.
+
+Potential issue: When entity moves, x can become out of bounds and removed. It doesn't change row. Good.
+
+Potential issue: Collision check before movement: if entity at player pos. If gold, reward. Our policy may move into gold. Good.
+
+Could no-op be dangerous because enemies move into player. But policy moves when threats adjacent/same row. If enemy far, no-op. Enemies move horizontally, may enter same row. When in same row, vertical. Good.
+
+But if enemy in same row but not adjacent, vertical dodge. Good. If enemy in row above/below, vertical away. If enemy in row two away, no action; may become adjacent next steps. But stateless, will react when adjacent. Could be too late if enemy moves fast? move_speed initial 5, ramps to 1. Enemy moves one cell every move_speed steps. Player can move one cell per step. If enemy in same row, vertical dodge one step leaves row. If enemy in adjacent row, moving away increases row distance. Good.
+
+What if enemy in row above and player row2, down to row3. Enemy row1, distance 2. Good. If enemy in row below and player row7, up to row6. Good.
+
+What if enemy in same row and player row1, down to row2. Good. If player row8, up to row7. Good.
+
+What if enemy in same row and player row2, up to row1. Row1 is allowed. Good.
+
+What if enemy in row above player row2 and same row2, down to row3. Good.
+
+What if enemy in row below player row7 and same row7, up to row6. Good.
+
+Horizontal global: If enemies on left, move right. But if enemy in same row left, vertical active (same) and horizontal right maybe also. Vertical weight higher, so vertical. If enemy in row above left, vertical down and horizontal right? down weight higher. Good.
+
+Gold seeking: If gold top, move up. But if enemy top, no. If enemy bottom, move up. Could move into enemy in top row? If enemy top but not same/adjacent? enemy_top true suppresses gold_up. Good. If enemy top but player bottom, moving up might eventually encounter, but suppressed. If gold bottom and enemy bottom suppressed. If gold left and enemy left suppressed. Good.
+
+Could use enemy_top/bottom to suppress vertical? We already have specific above/below. If enemy top but not adjacent, gold_up suppressed, maybe no action. Safe.
+
+Need maybe action 5 fire? In env fire no effect, but maybe previous action repeat could fire. We set fire low.
+
+Now, is there any requirement to use "NeuralCompiler IR and backend" exactly? We do.
+
+Need final answer one complete Python code block. No explanation. Ensure no testing. Could include comments? Fine. But maybe code only.
+
+Let's draft code:
+
+def build_policy():
+    def cell(r, c, ch):
+        return (r * 10 + c) * 6 + ch
+
+    def row_cells(r, ch):
+        return [cell(r, c, ch) for c in range(10)]
+
+    def rect_cells(r0, r1, c0, c1, ch):
+        out = []
+        for r in range(r0, r1 + 1):
+            for c in range(c0, c1 + 1):
+                out.append(cell(r, c, ch))
+        return out
+
+    prog = MLPProgram(
+        input_dim=600,
+        h1_dim=32,
+        h2_dim=32,
+        output_dim=6,
+        activation="tanh",
+    )
+
+    # H1 relative enemy row detectors
+    for r in range(2, 9):
+        prog.add_h1_and_gate(f"above_{r}", row_cells(r, 0), row_cells(r - 1, 1), gain=20.0)
+    for r in range(1, 8):
+        prog.add_h1_and_gate(f"below_{r}", row_cells(r, 0), row_cells(r + 1, 1), gain=20.0)
+    for r in range(1, 9):
+        prog.add_h1_and_gate(f"same_{r}", row_cells(r, 0), row_cells(r, 1), gain=20.0)
+
+    # H1 global half detectors
+    prog.add_h1_threshold("player_top", {i: 1.0 for i in rect_cells(1, 2, 0, 9, 0)}, threshold=0.5, gain=20.0)
+    prog.add_h1_threshold("player_bottom", {i: 1.0 for i in rect_cells(7, 8, 0, 9, 0)}, threshold=0.5, gain=20.0)
+    prog.add_h1_threshold("enemy_left", {i: 1.0 for i in rect_cells(1, 8, 0, 4, 1)}, threshold=0.5, gain=20.0)
+    prog.add_h1_threshold("enemy_right", {i: 1.0 for i in rect_cells(1, 8, 5, 9, 1)}, threshold=0.5, gain=20.0)
+    prog.add_h1_threshold("enemy_top", {i: 1.0 for i in rect_cells(1, 4, 0, 9, 1)}, threshold=0.5, gain=20.0)
+    prog.add_h1_threshold("enemy_bottom", {i: 1.0 for i in rect_cells(5, 8, 0, 9, 1)}, threshold=0.5, gain=20.0)
+    prog.add_h1_threshold("gold_top", {i: 1.0 for i in rect_cells(1, 4, 0, 9, 2)}, threshold=0.5, gain=20.0)
+    prog.add_h1_threshold("gold_bottom", {i: 1.0 for i in rect_cells(5, 8, 0, 9, 2)}, threshold=0.5, gain=20.0)
+    prog.add_h1_threshold("gold_left", {i: 1.0 for i in rect_cells(1, 8, 0, 4, 2)}, threshold=0.5, gain=20.0)
+    prog.add_h1_threshold("gold_right", {i: 1.0 for i in rect_cells(1, 8, 5, 9, 2)}, threshold=0.5, gain=20.0)
+
+    # H2 action scores
+    down_terms = {f"above_{r}": 1.0 for r in range(2, 9)}
+    down_terms["same_1"] = 1.0
+    prog.add_h2_gate("h2_down", down_terms, bias=float(len(down_terms)))
+
+    up_terms = {f"below_{r}": 1.0 for r in range(1, 8)}
+    for r in range(2, 9):
+        up_terms[f"same_{r}"] = 1.0
+    prog.add_h2_gate("h2_up", up_terms, bias=float(len(up_terms)))
+
+    prog.add_h2_gate("h2_left", {"enemy_right": 1.0}, bias=1.0)
+    prog.add_h2_gate("h2_right", {"enemy_left": 1.0}, bias=1.0)
+
+    prog.add_h2_gate("h2_gold_up", {"gold_top": 1.0, "enemy_top": -1.0}, bias=0.0)
+    prog.add_h2_gate("h2_gold_down", {"gold_bottom": 1.0, "enemy_bottom": -1.0}, bias=0.0)
+    prog.add_h2_gate("h2_gold_left", {"gold_left": 1.0, "enemy_left": -1.0}, bias=0.0)
+    prog.add_h2_gate("h2_gold_right", {"gold_right": 1.0, "enemy_right": -1.0}, bias=0.0)
+
+    prog.output_bias = [-10.0, -10.0, -10.0, -10.0, -10.0, -10.0]
+    prog.set_output_action(0, {})
+    prog.set_output_action(1, {"h2_left": 25.0, "h2_gold_left": 10.0})
+    prog.set_output_action(2, {"h2_up": 32.0, "h2_gold_up": 10.0})
+    prog.set_output_action(3, {"h2_right": 25.0, "h2_gold_right": 10.0})
+    prog.set_output_action(4, {"h2_down": 33.0, "h2_gold_down": 10.0})
+    prog.set_output_action(5, {})
+
+    return MLPCompilerBackend.compile(prog)
+
+Need check H1 count: above 7, below 7, same 8 =22. thresholds 10 =32. Good.
+
+H2 count 8 <=32.
+
+Potential issue: player_top and player_bottom H1 unused. That's okay. But they consume units. Could use them to break ties? Maybe we can incorporate into H2 without extra H1? H2 can include player_top/bottom as terms in action scores to bias direction. For example, h2_down OR terms plus player_top? If player_top true, h2_down true even no threat, causing move down at top. Not good. Could use in output? Output can reference H2 only, not H1. Could create H2 tie_break_down = player_top AND h2_down? Can't reference h2. Could create H1 interactions? Not needed.
+
+Unused H1 may produce activations but no output effect. Fine.
+
+Could there be a requirement to use all 32? No.
+
+Need maybe "architecture 600 -> 32 -> 32 -> 6" means exactly h1_dim=32 h2_dim=32. We set. Unused units okay.
+
+Let's think about tanh H2 OR with bias len. For h2_up with 14 terms, if one true, z=2, tanh 0.964. If two true, z=4, tanh 0.9993. Good. Output weight 32 => 30.8. Good.
+
+H1 AND true z=10, tanh 0.9999999959. Good.
+
+H1 threshold true for player_top if player row1/2: sum=1, threshold .5, gain20 => z=10. If player row3 false: sum=0, z=-10. Good.
+
+Enemy_left threshold: if one enemy left: sum=1, z=10. If multiple: sum>1, z>10. Good.
+
+Gold AND NOT: If gold_top true (z=10) and enemy_top false (z=-10): H1 values ~1 and -1. H2 z=1*1 + -1*(-1)=2. Good. If gold_top false and enemy_top false: -1+1=0. If gold_top true enemy_top true: 1-1=0. If gold_top false enemy_top true: -1-1=-2. Good.
+
+Output: If h2_gold_up true, h2_up false, up logit -10 + 32*0 + 10*0.964 = -0.36? Wait h2_up false 0, so -10+9.64=-0.36, no-op -10. Good. If h2_up false tiny positive, -10+0.000? +9.64 = -0.36. Good.
+
+If no conditions, h2_up false ~0, h2_gold_up false 0, up -10. h2_left false 0, left -10. All -10. Fire -10. Uniform. Good.
+
+If enemy_right true, h2_left true, h2_gold_right maybe? If gold_right false enemy_right true: h2_gold_right = -1 -1? gold_right false -1, enemy_right true +1 with term -1 => -2, tanh -1. So right logit? left: -10+25*1+10*(-1?) Wait h2_gold_left maybe false 0. left=15. right: h2_right false 0, h2_gold_right -1 => -20. down/up false. Good.
+
+If enemy_right true and gold_right true: h2_gold_right = gold_right 1, enemy_right 1 => 0. left=15. Good.
+
+If enemy_left true, right action. Good.
+
+If enemy_top true and gold_top true: h2_gold_up 0, no up gold. If enemy_top true but not adjacent, no vertical. Maybe no-op. Safe.
+
+Could policy get stuck at top/bottom? If enemy above and player row1? above_1 doesn't exist because enemy row0 none. If enemy same row1, down. If enemy below row2, up? below_1 true, h2_up true, but player row1 up stays row1. If enemy below row2, moving up doesn't increase distance? Player row1, enemy row2, up stays row1, distance 1. Down would move to row2 into enemy. So up (no-op effectively) is best. Good. If enemy below row3, below_1 false (only row2), no vertical; enemy may move horizontally, not vertically. Row distance remains. Fine.
+
+If enemy above row1 and player row2, down. Good.
+
+If enemy same row2, up to row1. Good.
+
+If enemy below row8 and player row7, up. Good.
+
+If enemy same row8, up. Good.
+
+What about enemy in row above but player row8, down to row8? If player row7 and enemy row6, down to row8, distance 2. Good. If player row8 and enemy row7, down stays row8, distance1; up would move to row7 into enemy. So down (no-op) best. Our above_8 true => h2_down true, action down (stays). Good.
+
+Thus vertical logic good.
+
+Could horizontal global move into enemy? If enemy_right true, move left. If enemy in same row right, vertical active and higher, so vertical. If enemy in row above right, vertical down higher. If enemy in row two away right, horizontal left may move away horizontally, okay. If enemy_left true, move right.
+
+Need maybe use no-op when no threats and no gold. Uniform includes no-op. Good.
+
+Now, is there any chance H1 AND gate false positive due to player row group having multiple active? Player channel one-hot, but observation wrapper obs[:,:,0]=s[:,:,0], state sets player one cell. Good.
+
+Could enemy row group have multiple active due to trail? We use channel 1 enemy only. Good.
+
+Could gold threshold use channel 2, but obs channel 2 is gold. Good.
+
+Need maybe channel 4 trail not used. Fine.
+
+Let's consider if the backend's add_h1_and_gate uses bias -1.5*gain. With gain=20, bias=-30. If both groups active: each group one active => sum weights 40, z=10. If only one group active: sum 20, z=-10. Good. If group_b has zero, group_a one: -10. If group_a zero, group_b one: -10. If group_b multiple (shouldn't) two: sum 40? group_b two active => 40, z=10 false positive. But at most one per row. Good.
+
+What about enemy row group includes row 0 or 9? We use rows 1..8. Entities only rows 1..8. Good.
+
+Potential issue: In _spawn_entity, slot_options from len(self.entities)=8, y=slot+1 => rows 1..8. Good.
+
+Need maybe action map: 'f' fire does nothing. Good.
+
+Could there be a hidden "NeuralCompiler IR and backend" not imported? The final code may need to import MLPProgram and MLPCompilerBackend. The prompt includes code with from .ir import MLPProgram in backend. In their harness, they may have these names. If not, our function would NameError. Should we include imports inside build_policy? For example:
+from .ir import MLPProgram
+from .backend import MLPCompilerBackend
+But relative imports may fail if not in package. The prompt says "Use the following NeuralCompiler IR and backend to build a policy. Return one complete Python code block defining build_policy() that returns MLPCompilerBackend.compile(program)." It likely expects these classes available in global namespace. Including imports could be wrong. Could include try/except? But no code execution? We can write code that references global. To be safe, we can not import. If they run in a namespace with classes, fine. If they run standalone with the provided code, they may have defined them. The final code block only function. Good.
+
+Could include "from typing import Dict, List" not needed.
+
+Need ensure no forward pass. We don't call forward.
+
+Now, let's think if we can improve within same units by using player_top/bottom to break ties. We have unused H2 units. Could create H2 units that combine H1 to produce final action scores with tie-breaking. For example, create h2_down_final = OR(above, same_1) AND? Can't AND with player_top in same H2? We can make h2_down_final terms include above/same and player_top with different weights to bias? But linear OR with extra term player_top would make down true when player_top even no threat. Not good. Could use negative weights? Want down score higher if player_top and down_raw true, but down_raw is H2 not H1. Can't.
+
+Could create H1 units for down_raw? We already have H1 above/same. To make down only if player_top? Need 3-way. Not.
+
+Tie not critical.
+
+Could use player_top/bottom in gold seeking? e.g., if player_top and gold_top, moving up may be no-op; but okay.
+
+Maybe we should use player_top/bottom to avoid moving up at top when enemy below? If enemy below row2 and player row1, h2_up true but up no-op. That's okay. If enemy below row3, no h2_up. If gold_top and player_top, h2_gold_up true, up no-op. Could waste steps. But no-op also. Not big.
+
+Could set h2_up terms exclude same_2? If player row2, up to row1 safe. Good.
+
+Potential issue: If enemy same row1, h2_down true. If enemy also right, h2_left true. Down weight 33, left 25, chooses down. Good.
+
+Potential issue: If enemy same row2, h2_up true. If enemy also left, h2_right true. Up weight 32, right 25, chooses up. Good.
+
+Potential issue: If enemy above row2 and enemy below row2? impossible? Could have enemy row1 and row3, player row2. above_2 and below_2 true. h2_down and h2_up true. Down weight 33, chooses down. If player row2, down to row3 where enemy below row3? Wait below_2 means enemy row3. Moving down to row3 would collide with enemy row3! Bad. If enemy above row1 and below row3, player row2, both up and down lead toward an enemy? Up to row1 (enemy above), down to row3 (enemy below). Both dangerous. Maybe horizontal move is better. Our policy chooses down (toward enemy below) due to weight. That's bad. Need handle both above and below: choose horizontal or no-op, not vertical into threat. We need priority: if both above and below, avoid vertical, use horizontal/no-op. Can we implement with H2? We have H1 above_r and below_r. For player row r, both above and below true. We want suppress vertical. H2 linear can't compute NOT(above AND below) easily? It can with terms? For a specific r, condition both = above_r & below_r. We could create H1 AND unit for both_r? We have H1 budget? We used 32. Could replace some unused player_top/bottom with both_r units? Need 7 both units (r=2..7). That's too many. But maybe create H2 unit "both_threat" as OR of above and below? Not enough. Need suppress vertical when both. Could set output weights such that if both, horizontal/no-op higher? But vertical scores both true, horizontal maybe false. No.
+
+Could design vertical action scores to be active only if not both. H2 linear over H1 can implement for each r? For down: want above_r true and below_r false. This is AND(above_r, NOT below_r). A single H2 can implement for one r: terms {above_r:1, below_r:-1}, bias 0. But we need OR over r=2..8. Can't OR of ANDs in one H2. Could create H2 units for each r down_safe (7) and up_safe (7), then output OR? Output can sum H2 terms, but H2 false 0, true positive. We can set output action down terms include all down_safe_r with weights, and output_bias negative. Output is linear over H2, can OR by summing positive H2 (false 0). Great! We don't need H2 OR unit; output can directly sum multiple H2 safe units. But H2 dim 32. We can create 7 down_safe + 7 up_safe + horizontal + gold = maybe 22. Good. This improves.
+
+Let's redesign H2 to handle both threats.
+
+H1 same as before (32). H2 units:
+For each player row r=2..8: down_safe_r = above_r AND NOT below_r? Also if same_r? For same row, vertical direction: if same_r and not (above/below?) We can include same in safe conditions.
+We want down action if:
+- enemy above (above_r) and no enemy below (below_r false) -> move down.
+- enemy same row and player row1? same_1 and no below_1? If same_1, down. If below_1 also true (enemy row2), down would move into enemy? Player row1, same row1 and below row2: down to row2 collision. Up no-op. Maybe no vertical. So down_safe_1 = same_1 AND NOT below_1.
+- Also if enemy above and same? above_r and same_r, below false: down safe? If same_r enemy in player row, down leaves row; if below false, safe. Condition above_r OR same_r, and NOT below_r. For r=1: same_1 OR above_1(none), NOT below_1.
+For r=2..8: down_safe_r = (above_r OR same_r) AND NOT below_r.
+Can a single H2 implement (A OR S) AND NOT B with H1 ±1? We need output + if (A or S) true and B false; 0 otherwise. Linear threshold? Let's see. Variables A,S,B ±1. Desired true if B=-1 and (A=1 or S=1). We can use terms: A:1, S:1, B:-1, bias? Cases:
+B=-1, A=1,S=-1: 1+0? S term 1*(-1)=-1, B term -1*(-1)=1 => sum=1-1+1=1 + b.
+B=-1, A=-1,S=1: -1+1+1=1+b.
+B=-1, A=1,S=1: 1+1+1=3+b.
+B=-1, A=-1,S=-1: -1-1+1=-1+b.
+B=1, A=1,S=-1: 1-1-1=-1+b.
+B=1, A=-1,S=1: -1+1-1=-1+b.
+B=1, A=1,S=1: 1+1-1=1+b.
+B=1, A=-1,S=-1: -1-1-1=-3+b.
+We want true cases positive, false negative/zero. Choose b=0? True min 1 positive; false max 1 (when B=1,A=1,S=1) positive false! That's when enemy above, same, and below all true. But can above, same, below all true? Player row r, enemy row r-1, r, r+1: possible (three entities). Then down would move into below enemy, bad. Need suppress if B true regardless. With b=-1? True min 0 (not positive), false max 0. Need b between? For true min 1+b >0 => b>-1. For false max 1+b <=0 => b<=-1. No strict. Could use b=-0.5: true min 0.5, false max 0.5 false positive. Not perfect.
+
+Maybe condition should be above_r AND NOT below_r, and same_r handled separately with NOT below and NOT above? For same row, if above or below also true, vertical may be dangerous. If same and below, up maybe? If same and above, down? Let's analyze.
+Player row r, enemy same row. If no other vertical threats, choose up except row1 down. If enemy below also, up is safe (away from below and leaves same). If enemy above also, down is safe. If both above and below, horizontal/no-op. So same row can be used to choose direction opposite to other threat.
+We can create safe H2 per direction:
+Down safe for row r:
+- above_r true and below_r false (move down away from above; if same also true, down leaves same and away from above, safe if below false)
+- same_r true and above_r true and below_r false? Already covered by above_r true. If above false, same true, below false: for r>1, up is preferred, not down. For r=1, down preferred. So down for same only r=1 and below false.
+Thus down_safe_r = above_r AND NOT below_r, for r=2..8; plus same_1 AND NOT below_1.
+Up_safe_r = below_r AND NOT above_r, for r=1..7; plus same_r AND NOT above_r for r=2..8? If same and no above, up safe. If below also true, up safe (away from below). Condition below_r AND NOT above_r covers if below true. If same true and below false and above false, need up for r=2..8. So up_safe_r = (below_r OR same_r) AND NOT above_r, for r=2..8; for r=1, same_1? up no-op, not needed; below_1 AND NOT above_1 (above none) but up no-op, maybe not useful. Could include but no-op.
+Can H2 implement (A OR S) AND NOT B? We saw issue when A,S,B all true. But for up_safe_r, A=above, S=same, B=below? Wait up safe = (below OR same) AND NOT above. Let A=above (to negate), S=same, B=below. Desired true if A=-1 and (B=1 or S=1). Terms: A:-1, B:1, S:1, bias? Cases:
+A=-1,B=1,S=-1: 1+1? A term -1*(-1)=1, B=1, S=-1 =>1+1-1=1+b.
+A=-1,B=-1,S=1: 1-1+1=1+b.
+A=-1,B=1,S=1: 1+1+1=3+b.
+A=-1,B=-1,S=-1: 1-1-1=-1+b.
+A=1,B=1,S=-1: -1+1-1=-1+b.
+A=1,B=-1,S=1: -1-1+1=-1+b.
+A=1,B=1,S=1: -1+1+1=1+b.
+A=1,B=-1,S=-1: -1-1-1=-3+b.
+Same issue false when A=1,B=1,S=1 (above, below, same all true) gives 1+b. Need b<=-1, true min 1+b>0 => b>-1. No.
+
+But can above, below, same all true? Yes three enemies in adjacent rows. In that case both vertical directions dangerous. We want false. Linear with three variables cannot perfectly implement (A or S) & !B without false when A,B,S all true? Maybe with different weights? Let's solve linear threshold for desired truth table. Variables x=above, y=same, z=below, each ±1. Desired up = (y or z) and not x. Truth table (x,y,z):
+-1,-1,-1:0
+-1,-1,1:1
+-1,1,-1:1
+-1,1,1:1
+1,-1,-1:0
+1,-1,1:0
+1,1,-1:0
+1,1,1:0
+Can a linear threshold separate? This is (not x) & (y or z). In ±1, not x = (1-x)/2, y or z = 1 - (1-y)(1-z)/4? Product needed. Linear separability? Let's check. Points desired 1: (-1,-1,1), (-1,1,-1), (-1,1,1). Desired 0: (1,1,1) is only conflict? The convex hull? We need w·v+b >0 for first three, <=0 for last. Let w=(a,b,c). Conditions:
+1: -a -b +c +b0 >0
+2: -a +b -c +b0 >0
+3: -a +b +c +b0 >0
+0: a +b +c +b0 <=0
+Add 1+2: -2a +0 +0 +2b0 >0 => b0 > a.
+Add 2+3: -2a +2b +0 +2b0 >0 => b0 + b > a.
+Add 1+3: -2a +0 +2c +2b0 >0 => b0 + c > a.
+0: a+b+c+b0 <=0.
+From b0 > a, then 0: a+b+c+b0 > a+b+c+a =2a+b+c. Could still <=0 if negative. Try choose a=1, b0=2. Need 1: -1 -b +c +2 =1 -b +c >0 => c > b-1.
+2: -1 +b -c +2 =1+b-c >0 => c < b+1.
+3: -1+b+c+2=1+b+c>0 => c > -b-1.
+0: 1+b+c+2 =3+b+c <=0 => c <= -3-b.
+Combine c > b-1 and c <= -3-b => b-1 < -3-b => 2b < -2 => b < -1. Also c < b+1. Choose b=-2. Then c > -3, c <= -1. Choose c=-2. Check: 1:1 -(-2)+(-2)=1>0; 2:1-2-(-2)=1>0; 3:1-2-2=-3? Wait 1+b+c =1-2-2=-3 not >0. Need c > -b-1 =1? Contradiction. Let's re-evaluate condition 3: -a + b + c + b0 >0 with a=1,b0=2 => 1 + b + c >0 => c > -1 - b. If b=-2, c >1. But 0 requires c <= -3 - b = -1. Contradiction. So not linearly separable. Thus single H2 cannot perfectly implement.
+
+But maybe we can accept false positive when all three true? If above, same, below all true, up_safe false positive would move up into above enemy. Bad. But rare? Could happen. Need better.
+
+Could use H1 AND gates to create safe conditions at H1 level? H1 can AND two input groups, not three. But we can create H1 for above_r AND NOT below_r? NOT not possible. But we can create H1 for above_r and below_r both? Then H2 can use? H2 linear can't subtract H1? It can with negative weights. Maybe create H1 both_r = above_r AND below_r (using input groups? above_r is not input, it's H1. H1 AND only inputs. Could create H1 both_r directly from inputs: player row r, enemy row r-1, enemy row r+1? 3-way not possible. But at most one enemy per row, could use add_h1_and_gate with group_a player row r, group_b enemy row r-1? That's above. To also require below, need 3 groups. Not possible.
+
+Could use H2 with approximate and hope. But maybe simpler original OR is okay. The both above/below case: original chooses down due weight, could be bad. Safe H2 with false positive all three also bad. Need maybe horizontal action when both. Could create H2 both_r? Not possible. But can create H2 "vertical_conflict" as OR of above and below? If both above and below, conflict true. But output can't subtract conflict from vertical? It can with negative weights: down logit = 33*h2_down - 20*h2_conflict. If conflict true, down logit reduced. But h2_down true, conflict true. If conflict false, down high. Could work! H2 conflict = OR(above_r, below_r?) But conflict should be both, not OR. If OR, any vertical threat reduces? Not good. Could create H2 conflict as above AND below? Single H2 can AND two H1 units: terms {above_r:1, below_r:1}, bias -1.5? For each r. Need 7 conflict units. We have H2 budget. Then output down/up can subtract conflict? But conflict is per row; output can sum all conflict units negative. If any conflict, reduce vertical. But if conflict true, both up/down reduced. Horizontal/no-op may win. Good.
+
+Let's explore. H1 same as before. H2 units:
+- h2_down_raw = OR(above_2..8, same_1) (8)
+- h2_up_raw = OR(below_1..7, same_2..8) (14)
+- conflict_r for r=2..7? above_r AND below_r. 6 units (r=2..7; above_2..7, below_2..7). Also r=1? above none; r=8 below none. 6.
+- h2_left, h2_right, gold 4. Total 2+6+2+4=14. Good.
+Output:
+down logit = 33*h2_down_raw - 25*sum(conflict_r) + 10*gold_down
+up logit = 32*h2_up_raw - 25*sum(conflict_r) + 10*gold_up
+left/right maybe also subtract conflict? If conflict, vertical dangerous, horizontal may be better. If conflict and no horizontal, no-op. If we subtract conflict from vertical only, left/right false 0, no-op -10. If conflict true, down raw true 33 -25 =8, up 32-25=7, still > no-op -10, so chooses vertical. Need subtract more, e.g., -40. Then down -7, up -8, no-op -10, still vertical slightly. Subtract -50: down -17, up -18, no-op -10 wins. But if conflict true and horizontal true, horizontal 25 wins. Good. Set conflict penalty 50. But if conflict true and raw false? conflict implies raw true (above/below), so okay. If multiple conflict units? At most one player row, so at most one conflict true. Penalty 50. Down logit 33-50=-17, up 32-50=-18, no-op -10. Good. If conflict true and gold same action 10, down -7? Wait -17+10=-7, still > no-op -10. Could set penalty 60: down -27+10=-17, no-op -10. Good. Use penalty 60.
+But output can have negative h2_terms for conflict units. Yes.
+Need H2 conflict AND of two H1 ±1. For AND of 2, want true +, false 0 ideally. Terms {above:1, below:1}, bias? Cases: both true:2+b; one true:1+b; none:-2+b. Want both positive, one/none <=0. Choose b=-1.5: both 0.5, one -0.5, none -3.5. Good. False negative, not 0. Output penalty negative weight: if conflict false -1, negative weight -60 * (-1) = +60! That would boost vertical when no conflict. Bad. We need conflict unit output 0 when false, positive when true. Can we make AND with false 0? For AND of 2, cannot make both one-true and none zero with one bias. But we can make false negative and use positive weight? If conflict false negative, positive penalty would reduce? Let's think. We want subtract when conflict true. If conflict unit false is -1, and we use negative weight, it adds positive. Not good. If we use positive weight, conflict true adds, false subtracts. Could adjust bias. Maybe create conflict unit with false 0, true positive? Not possible for AND of 2 with ±1? Let's solve: want t=2 positive, t=1 zero, t=0 zero. Linear z = w(2t-2)+b. t=0: -2w+b=0 => b=2w. t=1: 0+b=2w positive, not zero. So no.
+Could use H1 conflict? H1 AND gate false -1, true +1. Same issue.
+
+Alternative: Use conflict unit with false 0, true positive by using OR? Not AND. Could create conflict as above AND below using H1 AND gate, false -1. To use as penalty, we can transform: penalty = conflict + 1 (so false 0, true 2). But H2 cannot add constant? Output bias can add constant, but penalty term negative: -60*conflict -60? If conflict false -1 => +60, need output bias -60 to cancel. But output bias is per action constant. We can set down bias = -10 -60? Let's derive.
+Logit down = W_down*h2_down_raw + W_conf*conflict + bias.
+conflict true +1, false -1. Want when conflict true reduce by P relative to false. Let W_conf = -P/2? Then true: -P/2, false: +P/2. Add bias -P/2 to make false 0, true -P. So bias includes -P/2. But output_bias is base -10. We can set rule bias? set_output_action can include bias, but it overwrites b3[action]. We can set bias = -10 - P/2. Then conflict false contribution +P/2 cancels, true -P/2 plus bias => -10 -P. Good. But if multiple conflict units, at most one true, but all false -1. If we sum 6 conflict units with weight -P/2 each, false contribution = 6*(+P/2) = 3P, bias must -3P. True one: 5*(+P/2) + (-P/2) = 2P, bias -3P => -P. Good. So we can use multiple conflict units with negative weights and a large negative bias to cancel false. But output bias also affects no-op? We can set per action bias. For down/up, set bias = -10 - (num_conflict * P/2). For left/right maybe also subtract conflict? Could set similar. But output_bias global then rules bias overwrite. We can use set_output_action with bias.
+
+However, if conflict units false -1, negative weights add large positive; bias cancels. Need ensure no numerical issues. H2 conflict false tanh(-0.5) if bias -1.5? Wait H2 conflict with terms weight 1, bias -1.5: true z=0.5 => tanh 0.462, not +1. False one true z=-0.5 => -0.462, none z=-3.5 => -0.998. Not binary. Could use gain in H2? add_h2_gate terms can have weights. For AND of 2, use weight 10, bias -15: true z=5 => 0.9999, one true z=-5 => -0.9999, none -35 => -1. Good. So conflict H2 approx ±1. Good.
+
+Then output penalty with cancellation possible. But complexity. Maybe not needed. Original simple policy may be acceptable. But let's see if we can implement conflict penalty cleanly.
+
+H2 conflict_r: add_h2_gate(name, {above_r:10, below_r:10}, bias=-15). True z=20-15=5, one true 10-15=-5, none -20-15=-35. Good.
+
+Output down:
+conflict_names = [f"conflict_{r}" for r in range(2,8)] (6)
+P = 60. weight_conf = -P/2 = -30 each. False contribution per conflict: -30 * (-1) = +30, total +180. Bias should be base -10 -180 = -190. True one: five false +30*5=150, true -30 =>120; bias -190 => -70. Plus down_raw 33 => -37. No-op -10. Good. If no conflict: all false +180, bias -190 => -10, plus down_raw. Good.
+But if down_raw false and no conflict: -10. If down_raw true no conflict: 23. If conflict true: down_raw true (above) 33 -70 = -37. Up similarly. Good.
+If conflict true and gold_down true 10 => -27, still no-op. Good.
+If conflict true and horizontal left true 25 => left logit? If left also has conflict penalty? If not, left -10+25=15, wins. Good. If we don't penalize horizontal, conflict chooses horizontal if available. If no horizontal, no-op. Good.
+Need set left/right bias maybe -10 (no conflict penalty). But conflict units false -1 not referenced, no effect. Good.
+Gold actions up/down include conflict penalty via up/down bias. If conflict true, gold vertical suppressed. Good.
+
+But output rule bias overwrites b3[action]. We can set for down: bias=-190.0, h2_terms {h2_down_raw:33, conflict_r:-30..., h2_gold_down:10}. For up: bias=-190.0, terms {h2_up_raw:32, conflict:-30..., h2_gold_up:10}. For left/right: bias=-10.0, terms. No-op/fire bias=-10.
+But compile: if prog.output_bias is not None, b3[:] = output_bias. Then for each rule, if "bias" in rule: b3[act_idx] = float(rule["bias"]). So we can set output_bias [-10]*6 and rules with bias for down/up. Good.
+
+Need ensure H2 conflict units count: 6. H2 total: down_raw, up_raw, conflict 6, left, right, gold 4 =14. Good.
+
+H1 still 32. This policy better handles both above/below.
+
+But what about same row plus above/below all three? down_raw includes above, up_raw includes below/same. Conflict true (above&below) penalty suppresses vertical. Good. If same and above but no below: down_raw true, conflict false, down. Is down safe? Player row r, enemy above and same. Down leaves same and away from above, safe. Good. If same and below but no above: up_raw true (below or same), conflict false, up. Safe. If same only: for r=1 down_raw true (same_1), up_raw false? up_raw includes same_2..8, so row1 same only down. For r>1 up_raw true (same_r), down_raw false (unless above). Up. Good.
+
+What about above only: down_raw true, up_raw false (unless below/same). Down. Below only: up_raw true. Good.
+
+What about above and below but no same: conflict true, vertical suppressed. Horizontal/no-op. Good.
+
+What about above and below and horizontal enemy: horizontal action wins. Good.
+
+Need adjust down_raw terms: above_2..above_8 (7) + same_1 (1) =8. up_raw: below_1..below_7 (7) + same_2..same_8 (7) =14. Good.
+
+Conflict units: for r in range(2,8): above_r and below_r. r=2..7 (6). What about r=1 above none, r=8 below none. Good.
+
+H2 conflict AND with weight 10 bias -15. Let's verify with H1 values approx ±1. True: 10*1+10*1-15=5 => tanh .9999. One true: 10-10-15=-15? Wait if one true +1, other false -1: 10*1 +10*(-1) -15 = -15. Actually sum =0-15=-15, tanh -1. None: -20-15=-35. Good. I earlier used weight 1. With weight 10, one true -15. Great. So conflict false -1. Good.
+
+Output penalty cancellation with conflict false -1. For 6 conflicts, weight -30 each. False total +180. Bias -190. True one: five false +30*5=150, true -30 =>120, bias -190 => -70. Good. If two conflict true? At most one because player one row. But if due false positives? no. If two, contribution 4*30 +2*(-30)=120-60=60, bias -190 => -130, more suppression. Fine.
+
+But H2 conflict false may be -0.9999999999, false total +179.99999994, bias -190 => -10.00000006. Good.
+
+Down logit no conflict, down_raw false: -10. down_raw true: 23. Conflict true: down_raw true 33 -70 = -37. If gold_down true +10 => -27. No-op -10. Good.
+
+Up logit conflict true: 32 -70 = -38. Good.
+
+Left/right no conflict penalty. If conflict true and left true: 15. If left false: -10. No-op -10. If left false tiny? H2 left false 0, logit -10. Good.
+
+Gold left/right: If conflict true and gold_left true, left logit -10+10=0, no-op -10, chooses left. Is horizontal safe when both above/below? Maybe yes, moving horizontally may avoid. If no horizontal, no-op. Good.
+
+Could conflict true and gold_up true: up logit -38+10=-28, no-op. Good.
+
+Need set output rules with bias. For down/up, include bias. For left/right, maybe bias -10. For no-op/fire, bias -10. But if we set output_bias and rules with bias, okay.
+
+Code:
+conflict_names = [f"conflict_{r}" for r in range(2,8)]
+conflict_terms = {name: -30.0 for name in conflict_names}
+down_terms = {f"above_{r}":1.0 for r in range(2,9)}; down_terms["same_1"]=1.0
+prog.add_h2_gate("h2_down", down_terms, bias=float(len(down_terms)))
+up_terms...
+prog.add_h2_gate("h2_up", up_terms, bias=float(len(up_terms)))
+for r in range(2,8): prog.add_h2_gate(f"conflict_{r}", {f"above_{r}":10.0, f"below_{r}":10.0}, bias=-15.0)
+prog.add_h2_gate("h2_left", {"enemy_right":1.0}, bias=1.0)
+...
+prog.output_bias = [-10.0]*6
+prog.set_output_action(0, {}, bias=-10.0)
+prog.set_output_action(1, {"h2_left":25.0, "h2_gold_left":10.0}, bias=-10.0)
+prog.set_output_action(2, {"h2_up":32.0, "h2_gold_up":10.0, **conflict_terms}, bias=-190.0)
+prog.set_output_action(3, {"h2_right":25.0, "h2_gold_right":10.0}, bias=-10.0)
+prog.set_output_action(4, {"h2_down":33.0, "h2_gold_down":10.0, **conflict_terms}, bias=-190.0)
+prog.set_output_action(5, {}, bias=-10.0)
+
+Need check set_output_action signature: set_output_action(self, action_idx, h2_terms, bias=0.0). It always includes bias in rule? It appends {"action_idx":..., "h2_terms":..., "bias": float(bias)}. Compile if "bias" in rule: b3[act_idx] = float(rule["bias"]). So if we pass bias=-10, okay. If we don't pass, default 0 would overwrite b3 to 0! Important. In compile, for every rule, if "bias" in rule (always, because set_output_action adds bias default 0.0), b3[act_idx] = rule bias. So if we set output_bias and then call set_output_action without bias, it will set b3[action]=0, not -10. In our earlier plan without bias, we must pass bias=-10 for all actions. Good catch. The IR set_output_action always includes bias. So need pass bias for every action. For no-op/fire, bias=-10. For left/right, -10. For down/up, -190. Good.
+
+If we don't want output_bias, we can just set biases in rules. But output_bias can be None. Simpler: don't set prog.output_bias, set each action bias. But compile b3 initialized zeros; rules set each action bias. Need all 6 actions have rules. We do. So output_bias not needed. But can set for safety. If set output_bias and rules bias, rules overwrite. Fine.
+
+Need ensure down/up bias -190 accounts for conflict false. But if we also set output_bias -10, rule bias overwrites. Good.
+
+Let's recalc down/up bias with conflict terms weight -30, 6 conflicts. False conflict H2 = -1. Contribution +180. We want base -10 when no conflict and raw false. Bias +180 = -10 => bias=-190. Good.
+When conflict true, contribution: one true -30, five false +150 => +120. Bias -190 => -70. Raw down 33 => -37. Good.
+What if conflict H2 true not exactly +1 but 0.9999999999, false -0.9999999999. Fine.
+
+But H2 conflict AND with weight 10 bias -15: if above true, below false: 10*1 +10*(-1) -15 = -15 => -1. If both true: 20-15=5 => 0.9999999959. Good.
+
+Now, H2 down_raw OR with bias len. H1 above/same false -1, true +1. down_raw false 0, true 2. Good. But if above true and below true (conflict), down_raw true. Penalty suppresses.
+
+What about above true and same true and below false: down_raw true, conflict false, down. Good.
+What about below true and same true and above false: up_raw true, conflict false, up. Good.
+What about same only row1: down_raw true, up_raw false, down. Good.
+What about same only row2: up_raw true, down_raw false, up. Good.
+
+What about enemy above row2 and enemy below row3 (conflict), no same. down_raw true, up_raw true, conflict true. Down logit -37, up -38, no-op -10. Good. If enemy_right true, left logit 15, chooses left. Is left safe? Enemy above/below, moving left may be safe unless enemy in same row? no same. Good.
+
+What about enemy above row2, enemy below row3, enemy right (not same). left action. Good.
+
+What about enemy above row2, enemy below row3, enemy left. right action. Good.
+
+What about enemy above row2, enemy below row3, no horizontal. no-op. Enemies move horizontally, may eventually same row? They are in adjacent rows, not same. No-op may be safe for a while. Good.
+
+Could no-op be bad if enemy in same row? Conflict only if above and below, no same. If same and above/below all three, conflict true, vertical suppressed, horizontal/no-op. If same and above only, down. If same and below only, up. Good.
+
+Now, H1 global enemy_left/right may be true due to enemies in above/below rows. In conflict case, horizontal action may be chosen based on global side. If enemies above/below both on right, move left. Good. If one left one right, enemy_left and enemy_right both true, h2_left and h2_right true. Left weight 25, right 25 tie. Could set left 26, right 25. Arbitrary. If both sides, no-op maybe better. But tie horizontal. Could add conflict penalty to horizontal? If conflict true and both left/right, maybe no-op. But not necessary.
+
+Could set horizontal weights lower, e.g., 20, and if both left/right true, both 10, no-op -10? Actually -10+20=10, still horizontal. To make no-op when both left/right, need detect both left/right. Could create H2 conflict_lr = enemy_left AND enemy_right, penalty. But not needed.
+
+Maybe use no-op default -10, horizontal true 15. If both left/right, both 15. Fine.
+
+Need consider gold seeking with conflict penalty: If conflict true and gold_left true, left logit -10+10=0, no-op -10, chooses left. If gold_left false, no-op. Good.
+
+Now, H1 player_top/bottom unused. Could use them to break horizontal tie? Not needed. But unused H1 okay. Could we replace player_top/bottom with enemy_any or gold_any? Not needed.
+
+Could use player_top/bottom to improve conflict: if conflict and player_top, down? But conflict means enemy above and below; at top row1 conflict impossible (above none). At row2 conflict, down to row3 (enemy below) bad, up to row1 (enemy above) bad. Horizontal/no-op. Good.
+
+Now, check H2 count with conflict: down_raw, up_raw, 6 conflict, left, right, 4 gold =14. Good.
+
+Need ensure H2 names conflict_r not conflict with H1? H2 names separate. Good.
+
+Potential issue: Output down/up bias -190 is large negative. If conflict units false not exactly -1, base may be slightly off. But okay. If H2 conflict false is -0.9999999999, contribution +179.99999994, bias -190 => -10.00000006. Good. If H2 conflict false for one true? conflict false includes one true case (above or below only) z=-15 => -1. Good.
+
+But H2 conflict false when above true below false is -1, yes. When above false below true -1. When none -1. Good.
+
+Now, H2 down_raw OR false 0. But H1 above/same false -1. If down_raw false, contribution 0. If down_raw true, 2. Good.
+
+Let's compute down logit no conflict, down_raw true: bias -190 + conflict false +180 + 33*0.964? Wait h2_down true tanh(2)=0.964, not 1. 33*0.964=31.8. Total -10+31.8=21.8. Good. If down_raw true with multiple terms, tanh(4)=0.9993, 32.98. Good.
+Conflict true: conflict contribution +120, bias -190 => -70, down_raw 31.8 => -38.2. Good.
+
+Up similar.
+
+Horizontal h2_left true tanh(2)=0.964, weight25 =>24.1, bias -10 =>14.1. Good.
+
+Gold h2_gold_up true tanh(2)=0.964, weight10 =>9.64. If up raw false, up logit -10+9.64=-0.36. Good.
+
+If gold_up true and up_raw true: -10+31.8+9.64=31.4. Good.
+
+If gold_up false but enemy_top true: h2_gold_up z=0? gold_top false, enemy_top true => -2 tanh -0.964, contribution -9.64. Up logit if up_raw false: -19.64. Good.
+
+Need maybe set gold weights 12 to make gold action more likely? -10+11.57=1.57. Good. But survival priority. 10 okay.
+
+Could no-op be chosen over gold if gold action logit -0.36 > -10, yes gold. Good.
+
+Now, is there any issue with large negative bias -190 and tanh? Logits can be large negative, softmax okay. No numerical issue in float32? -190 fine.
+
+Need maybe output_bias not set. If we set prog.output_bias = [-10]*6, then rules bias overwrite. Fine. But if we forget an action rule, b3 remains -10. We have all.
+
+Let's adjust code with conflict.
+
+Full code:
+
+def build_policy():
+    def cell(r,c,ch): return (r*10+c)*6+ch
+    def row_cells(r,ch): return [cell(r,c,ch) for c in range(10)]
+    def rect_cells(r0,r1,c0,c1,ch):
+       ...
+    prog = MLPProgram(...)
+    # H1
+    ...
+    # H2 raw vertical
+    down_terms = {f"above_{r}":1.0 for r in range(2,9)}
+    down_terms["same_1"] = 1.0
+    prog.add_h2_gate("h2_down", down_terms, bias=float(len(down_terms)))
+    up_terms = {f"below_{r}":1.0 for r in range(1,8)}
+    for r in range(2,9): up_terms[f"same_{r}"]=1.0
+    prog.add_h2_gate("h2_up", up_terms, bias=float(len(up_terms)))
+    # conflict
+    for r in range(2,8):
+        prog.add_h2_gate(f"conflict_{r}", {f"above_{r}":10.0, f"below_{r}":10.0}, bias=-15.0)
+    # horizontal/gold
+    ...
+    conflict_terms = {f"conflict_{r}": -30.0 for r in range(2,8)}
+    # output
+    prog.set_output_action(0, {}, bias=-10.0)
+    prog.set_output_action(1, {"h2_left":25.0, "h2_gold_left":10.0}, bias=-10.0)
+    prog.set_output_action(2, {"h2_up":32.0, "h2_gold_up":10.0, **conflict_terms}, bias=-190.0)
+    prog.set_output_action(3, {"h2_right":25.0, "h2_gold_right":10.0}, bias=-10.0)
+    prog.set_output_action(4, {"h2_down":33.0, "h2_gold_down":10.0, **conflict_terms}, bias=-190.0)
+    prog.set_output_action(5, {}, bias=-10.0)
+    return MLPCompilerBackend.compile(prog)
+
+Need check Python dict unpacking **conflict_terms in dict literal okay. Yes.
+
+Potential issue: set_output_action h2_terms dict may have duplicate keys? conflict_terms keys not same as h2_up/gold. Good.
+
+Potential issue: H2 conflict units are added after h2_down/up? Order doesn't matter. Output references them. Good.
+
+Potential issue: H2 down_raw uses H1 above/same. H2 conflict uses H1 above/below. Good.
+
+Now, let's think if H1 same_r AND gate can be true when enemy row r is gold? No, enemy channel only enemies. Good.
+
+Could gold be in same row and enemy in adjacent rows. Gold seeking may move vertical into enemy? Gold_up suppressed if enemy_top, but if enemy above specific row not top? enemy_top global may be false if enemy above row5? Wait enemy_top is rows1-4. If player row6, enemy above row5 (not top), gold_top? gold top rows1-4. Gold_up condition gold_top and not enemy_top. If gold top and enemy row5, enemy_top false, gold_up true, move up. But enemy row5 is between player row6 and gold top? Moving up to row5 could collide with enemy row5. Our specific vertical survival: above_6 true (enemy row5) => h2_down true, conflict? below maybe false. Down weight 33, gold_up 10, down logit 23, up logit -10+10? up_raw false? below/same false, up logit -0.36. Chooses down, away from enemy row5, not toward gold. Good. Global enemy_top not needed.
+
+If gold bottom and enemy row5, player row6, enemy below? below_6 enemy row7? no. enemy row5 above, down? h2_down true, gold_down maybe true (gold_bottom and not enemy_bottom). Down logit 23+10=33, chooses down (toward gold? player row6 down to row7, gold bottom rows5-8 maybe row7/8, but enemy row5 above, safe). Good.
+
+If gold top and enemy row5, player row6, down away from gold. Safe.
+
+Global gold half may be coarse but survival specific overrides.
+
+What if gold in same row left, enemy above. h2_down true, h2_gold_left true. Down logit 23, left logit 15? left -10+25*? enemy_right? If enemy above maybe enemy_right true? h2_left maybe true if enemy right. If enemy above left, enemy_left true => h2_right true. Gold_left true => left logit -10+10=0. Down wins. Good.
+
+Now, consider reward: collecting gold may require moving into gold. If gold in same row and no enemy, horizontal gold action moves toward gold half. If gold left, move left. If gold right, move right. If gold top, move up. If gold bottom, move down. This may collect. If gold in same row but player at left edge and gold left? no-op? h2_gold_left true, left action at x=0 no-op. Fine.
+
+Could policy oscillate? If gold top, move up until top, then up no-op. If enemy appears, react. Good.
+
+Now, need ensure no code execution. We just provide code.
+
+Let's consider if the backend's MLPProgram.add_h2_gate expects h1_terms Dict[str,float]. We pass. Good.
+
+Potential issue: H2 OR bias = len(terms) assumes H1 false -1. For h2_down with 8 terms, if one true z=2. If H1 true not exactly +1, z ~1.99999999. Good. If all false z ~0. Good.
+
+Potential issue: H2 conflict AND with weight 10 bias -15: if above true below false, z = 10*0.9999999959 +10*(-0.9999999959) -15 = -15 exactly? The true and false values may differ slightly if H1 above true from AND gate true z=10, below false from AND gate false z=-10. Both tanh(±10) same magnitude, sum 0, -15. Good. If above false below false, -20-15=-35. Good.
+
+Potential issue: H1 above/below/same AND gates all use gain=20. True z=10, false z=-10. Good.
+
+Potential issue: H1 threshold enemy_left true with multiple enemies z>10, tanh 1. False z=-10. Good.
+
+Now, let's think if we should use trail channel to detect enemy behind and avoid? Not necessary.
+
+Could there be a requirement "no forward pass" meaning we shouldn't even call inspect_activations. We don't.
+
+Final answer should be one code block. Need maybe not include analysis. final with code.
+
+Double-check syntax:
+- MLPProgram dataclass has fields input_dim, h1_dim, h2_dim, output_dim, activation, h1_units, h2_units, output_rules, output_bias. We instantiate with keyword args. Good.
+- add_h1_threshold returns name, we ignore.
+- add_h1_and_gate returns name.
+- add_h2_gate returns name.
+- set_output_action action_idx int, h2_terms dict, bias float.
+
+Potential issue: In compile, for H2 unit, it loops h1_terms and adds W2[h1_idx, v_idx] += w. If h1_terms has negative weights, okay.
+For output rules, W3[h2_idx, act_idx] += w. Negative conflict weights okay. b3[action] = bias. Good.
+
+Potential issue: If output_bias is None, b3 zeros then rules set all actions. We can omit output_bias. But if we omit, and an action rule missing, b3 remains 0. We have all. Let's omit output_bias to avoid confusion. But set_output_action always sets bias. Good.
+
+Code without prog.output_bias:
+    prog.set_output_action(0, {}, bias=-10.0)
+...
+This sets b3 all. Good.
+
+Need maybe action 5 fire bias -10. Good.
+
+Let's consider if no-op should have higher bias when no conditions? All actions -10, uniform. If we want no-op default, set no-op bias -5, others -10. But if no conditions, no-op more likely. Could set no-op bias -5. But if gold true, gold action -0.36 > -5? Actually -0.36 > -5, gold. If survival true, 21 > -5. If no conditions, no-op -5, others -10, chooses no-op. That may be safer. Let's set no-op bias -5.0, fire -20? But previous action repeat may cause. No-op safe. However, if no conditions but gold false, no-op. Good. If gold true, gold action logit -0.36, no-op -5, gold chosen. If gold action logit maybe -0.36, yes. If gold true but h2_gold true tanh 0.964, weight10 =>9.64, bias -10 => -0.36. Good. If we set no-op -5, gold still chosen. If gold weight 10 and h2_gold true but h2 survival false tiny, okay. If gold true but h2_gold true only 0.964, -0.36 > -5. Good.
+If no conditions, no-op -5, left/right/up/down -10 (plus tiny), fire -20. Good. Let's set no-op bias -5.0, fire -20.0. For left/right bias -10. For down/up bias -190 (base -10 when no conflict). But if no conflict and raw false, down -10. No-op -5, so no-op default. Good.
+If conflict true, down -37, no-op -5. Good.
+If horizontal true, left 14, no-op -5. Good.
+If gold true, gold action -0.36, no-op -5. Good.
+This improves default no-op.
+
+Need adjust down/up bias? Base when no conflict should be -10, not -5, because no-op has -5. We want vertical actions lower than no-op when false. So bias -190 gives -10. Good.
+Left/right bias -10. Gold actions included in up/down/left/right biases. If gold true, action logit -0.36 > no-op -5. Good.
+Fire bias -20.
+
+What about action 0 no-op h2_terms empty, bias -5. Good.
+
+Could no-op be chosen over gold if gold action logit -0.36? No, -0.36 > -5. Good. If h2_gold true but tanh(2)=0.964, yes. If H1 gold true but enemy false, H2 z=2. Good.
+
+If gold true but survival raw false and conflict false, up logit -10+9.64=-0.36. Good.
+
+If gold true but survival raw false and conflict true? conflict penalty suppresses: up -70+9.64=-60.36, no-op. Good.
+
+Now, if no conditions, up/down false 0, conflict false contribution cancels to -10. left/right false 0, -10. no-op -5. Good.
+
+Need ensure down/up bias -190 with conflict false gives -10, not -5. Yes.
+
+Could set left/right bias -8 to make horizontal more likely? No, no-op default. Horizontal true 14 > -5. Good.
+
+Now, H2 gold AND NOT false can be negative, making action logit lower than -10. Fine.
+
+Let's think about softmax with logits: no-op -5, others -10, fire -20. No-op probability ~ e^5/(e^5+4e^0+e^-15) ~ 0.993. Good. With 0.1 previous repeat, okay.
+
+If gold true, gold action -0.36, no-op -5, probability ~ e^4.64/(e^4.64+e^-5+...) ~0.99. Good.
+
+If survival true, logit ~22, high.
+
+Now, potential issue: down/up bias -190 is large; if conflict units false not exactly -1 due to H2 conflict false one true z=-15 tanh -1, none -35 -1. Good. If H2 conflict false all -1, cancellation exact. If H2 conflict true +0.9999999959, contribution -29.99999988, false others +30*5=150, total 120.00000012, bias -190 => -69.99999988. Good.
+
+Now, H2 down_raw true tanh(2)=0.964, but if multiple true tanh(4)=0.9993. Down logit no conflict ~21.8-32.9. Good.
+
+Could down_raw false but conflict true? Conflict true implies above and below true, so down_raw true (above) and up_raw true (below). Good.
+
+Now, H1 same_1 in down_raw. If player row1 and enemy same row1, down. If enemy below row2 also, conflict? conflict_1 not defined, so no penalty. down_raw true, up_raw? below_1 true => up_raw true. Both vertical true, no conflict penalty because conflict only r=2..7. Player row1, enemy same row1 and below row2: down moves into enemy below, up no-op. Our policy: down logit 23, up logit? up_raw true (below_1) 32, no conflict, up logit 22. Up slightly lower than down (33 vs32). Chooses down, bad. Need handle row1 conflict with same and below. Similarly row8 above and same: up moves into enemy above, down no-op; our policy down? above_8 true down, same_8 up, no conflict (r=8 no below), down weight 33, up 32, chooses down (no-op) actually safe? Player row8, enemy above row7 and same row8: down stays row8 (no-op), up into enemy above. Down safe. Good. Row1 case: down into enemy below, up no-op. We need up priority for row1 when below and same? More generally, if player at top boundary, up is no-op safe, down may be dangerous if enemy below. Our conflict penalty doesn't cover row1 because above none. But if same_1 and below_1, both down and up raw true. We want up (no-op) or horizontal, not down. Could adjust weights: up weight 33, down 32? Then row1 same+below chooses up. But row8 above+same chooses down? If up weight higher, row8 above+same would choose up (dangerous). Need boundary-specific.
+
+We can create H1/H2 for boundary conflicts. We have H2 budget. Could create conflict_top = same_1 AND below_1? H2 AND of H1 same_1 and below_1. Penalty for down? Or boost up. Similarly conflict_bottom = above_8 AND same_8? Penalty for up? Let's analyze.
+
+Row1: possible threats: same_1, below_1. If both, down dangerous, up no-op safe. We want suppress down or boost up. Create H2 top_conflict = same_1 AND below_1. Use penalty on down (or boost up). Since H2 AND false -1, can use output penalty with bias cancellation? Only one unit. For down action, add weight -P/2 and bias adjust. But down bias already -190 for 6 conflicts. We can include top_conflict in conflict_terms with same weight -30 and adjust bias by -30? Wait each conflict unit false -1, weight -30 contributes +30 false. To keep base -10, bias must subtract 30 per unit. We have 6 conflicts bias -190 = -10 -6*30. If add one more conflict unit with weight -30, bias should be -10 -7*30 = -220. For up action, do we also penalize? top_conflict true, up safe, no penalty. But up bias currently -190 for 6 conflicts. If we don't include top_conflict in up, up base remains -10. Good. But if top_conflict false, no effect. If top_conflict true, down suppressed, up raw true (below_1) and maybe same? up logit 22, down -? down raw true, penalty: 6 conflicts false +180, top_conflict true -30 =>150, bias -220 => -70, down raw 33 => -37. Up wins. Good.
+But if top_conflict true and horizontal, horizontal wins. Good.
+
+Row8: threats above_8, same_8. If both, up dangerous, down no-op safe. Create bottom_conflict = above_8 AND same_8. Penalize up, not down. Add to up conflict terms, adjust up bias -220. Down bias remains -190? But down should not be penalized by bottom_conflict. However, down base with 6 conflicts -190. If bottom_conflict not in down, no effect. Good.
+
+What about row1 above none, below only: up raw true (below_1) but up no-op, down false. Up action no-op, okay. Row8 above only: down raw true no-op, okay.
+
+What about row1 same only: down raw true, up false, down safe (leaves row). Good. Row8 same only: up raw true, down false, up safe. Good.
+
+What about row1 below only: up raw true no-op, safe. Row8 above only: down raw true no-op, safe.
+
+Need H2 top_conflict and bottom_conflict. H2 count +2 =16. Good.
+
+H2 top_conflict: terms {same_1:10, below_1:10}, bias=-15. True if both. bottom_conflict: {above_8:10, same_8:10}, bias=-15.
+
+Output:
+conflict_terms_down = {f"conflict_{r}": -30 for r in 2..7} plus top_conflict: -30. (7 units) bias_down = -10 - 7*30 = -220.
+conflict_terms_up = {f"conflict_{r}": -30 for r in 2..7} plus bottom_conflict: -30. bias_up = -220.
+But what about top_conflict for up? No penalty. bottom_conflict for down? No penalty.
+However, if top_conflict true, up raw true, down raw true. Up bias -220 but up conflict terms do not include top_conflict. Up has 6 middle conflicts false +180, bias -220 => -40, plus up_raw 32 => -8? Wait that's wrong! Up bias should account only for conflict units included in up terms. If up terms include 6 middle conflicts (false +180) and not top_conflict, bias should be -190, not -220. If we set -220, up base becomes -40 when no middle conflict, too low. So bias per action must equal -10 - 30*(number of conflict units in that action's terms). For down: includes 6 middle + top =7 => -220. For up: includes 6 middle + bottom =7 => -220. But top_conflict not in up, bottom_conflict not in down. If top_conflict true, up terms don't include it, so up contribution from its 6 middle false +180, bias -220 => -40, plus up_raw 32 => -8. That's lower than no-op -5, so up not chosen! But we wanted up safe. The bias -220 is too negative because it accounts for bottom_conflict false? Wait up terms include bottom_conflict, not top. bottom_conflict false contributes +30. So up terms false total: 6 middle + bottom =7 units => +210. Bias -220 => -10. Good. I forgot bottom_conflict false. If top_conflict true, bottom_conflict false, up false total +210, bias -220 => -10, up_raw 32 =>22. Good. Down terms include top_conflict true: 6 middle false +180, top true -30 =>150, bias -220 => -70, down_raw 33 => -37. Good.
+If bottom_conflict true, up suppressed, down safe. Down terms include bottom? no, down false total 6 middle + top false =210, bias -220 => -10, down_raw 33 =>23. Up terms include bottom true: 6 middle false +180, bottom true -30 =>150, bias -220 => -70, up_raw 32 => -38. Good.
+If no boundary conflict, both biases -220 with 7 false units => -10. Good.
+
+So down conflict units: middle 6 + top_conflict. Up conflict units: middle 6 + bottom_conflict. Bias both -220.
+
+What about middle conflict true: down/up both suppressed. Good.
+
+What about top_conflict true and middle conflict true? Player row1 cannot have middle conflict (player row2..7). So no.
+
+What about bottom_conflict true and middle conflict? no.
+
+Now, H2 top_conflict AND same_1 and below_1. Can same_1 and below_1 both true? Player row1, enemy row1 and enemy row2. Yes. H1 same_1 true, below_1 true. Good.
+Bottom_conflict above_8 and same_8. Good.
+
+Could there be row1 same and below and enemy_right, horizontal wins. Good.
+
+Now, what about row2 above and below conflict, middle conflict_2 true. Good. Row2 above and same and below all three: conflict_2 true, vertical suppressed. Good.
+
+What about row2 above and same, no below: down safe. top/bottom conflict false. Good.
+Row2 below and same, no above: up safe. Good.
+
+Now, H2 count: down_raw, up_raw, middle conflict 6, top_conflict, bottom_conflict, left, right, gold 4 =16. Good.
+
+H1 still 32.
+
+Output terms:
+middle_conflict_terms = {f"conflict_{r}": -30.0 for r in range(2,8)}
+down_conflict_terms = dict(middle_conflict_terms); down_conflict_terms["top_conflict"] = -30.0
+up_conflict_terms = dict(middle_conflict_terms); up_conflict_terms["bottom_conflict"] = -30.0
+bias_down = -10.0 - 30.0 * len(down_conflict_terms) # -220
+bias_up = -10.0 - 30.0 * len(up_conflict_terms) # -220
+
+Set output:
+prog.set_output_action(2, {"h2_up":32.0, "h2_gold_up":10.0, **up_conflict_terms}, bias=bias_up)
+prog.set_output_action(4, {"h2_down":33.0, "h2_gold_down":10.0, **down_conflict_terms}, bias=bias_down)
+
+Left/right bias -10. No-op -5. Fire -20.
+
+Check base no conflict: down terms 7 false +210, bias -220 => -10. up same. Good.
+If down_raw true no conflict: 21.8. If up_raw true:21.8? up weight32 =>20.8? Actually 32*0.964=30.85, -10=20.85. Down 33*0.964=31.8-10=21.8. Slight down priority. Fine.
+If top_conflict true: down suppressed, up 20.85. Good.
+If bottom_conflict true: up suppressed, down 21.8. Good.
+If middle conflict true: both suppressed. Good.
+
+What about row1 below only: up_raw true, no top_conflict (same false), up logit 20.85, down false -10, no-op -5. Chooses up (no-op). Good.
+Row8 above only: down logit 21.8, up false, chooses down (no-op). Good.
+
+What about row1 same only: down logit 21.8, up false, chooses down (move to row2). Good.
+Row8 same only: up logit 20.85, chooses up. Good.
+
+What about row1 same and below: top_conflict true, up 20.85, down -37, chooses up (no-op). Good.
+Row8 above and same: bottom_conflict true, down 21.8, up -38, chooses down (no-op). Good.
+
+Great.
+
+Could there be row1 below and enemy above? above none. Good.
+
+Now, what about row2 above and below conflict, but player at row2, horizontal no-op? no-op -5, vertical suppressed -37, horizontal if any 14. Good.
+
+Now, H2 top_conflict/bottom_conflict false -1. Output penalty cancellation works.
+
+Need ensure H2 top_conflict AND uses H1 same_1 and below_1. Both H1 AND gates. Good.
+
+Potential issue: H2 top_conflict true if same_1 and below_1. But if same_1 true and below_1 true, down_raw true (same_1), up_raw true (below_1). Good.
+
+Now, could top_conflict false but down dangerous due to enemy below not same? Row1 below only: down false, up no-op. Good. Row1 no same, no below: no vertical. Good.
+
+Row8 above only: down no-op, up false. Good.
+
+Now, what about row2 above and below conflict, but moving horizontal may be dangerous if enemy in same row? no same. If enemy above/below, horizontal safe. Good.
+
+Now, H1 global enemy_left/right may be true due to above/below enemies. In conflict, horizontal chosen if one side. If enemies on both sides, left/right tie. Could no-op be better. But okay.
+
+Could add left/right conflict penalty if both left/right? Not needed.
+
+Now, H1 player_top/bottom still unused. Could use them to create top/bottom conflict? We used H2. Unused okay.
+
+Could we replace player_top/bottom with something else? Not needed.
+
+Let's count H1 again: 22 AND + 10 threshold =32. Good.
+
+H2 count: down_raw 1, up_raw 1, middle conflict 6, top_conflict 1, bottom_conflict 1, left 1, right 1, gold 4 =16. Good.
+
+Now, check H2 OR bias for up_raw with 14 terms. If below_1 true (row1 below only), up_raw true. Good. If same_2..8 true. Good.
+
+Now, output up bias -220 includes bottom_conflict false. If bottom_conflict false -1, contribution +30. Good.
+
+Let's compute up base no conflict: 6 middle false + bottom false =7*30=210, bias -220 => -10. Good.
+If bottom_conflict true: 6 middle false +180, bottom true -30 =>150, bias -220 => -70. Up raw true (above_8? bottom_conflict true implies above_8 and same_8; up_raw includes same_8, so true) 32 => -38. Down raw includes above_8 true, down_conflict terms: 6 middle false + top false =210, bias -220 => -10, down raw 33 =>23. Good.
+
+If top_conflict true: down terms 6 middle false + top true =150, bias -220 => -70, down raw true (same_1) 33 => -37. Up terms 6 middle false + bottom false =210, bias -220 => -10, up raw true (below_1) 32 =>22. Good.
+
+If middle conflict r true: down terms 5 middle false + top false? Wait down includes top false and 6 middle, one middle true. False total: 5*30 + top30 =180, true -30 =>150, bias -220 => -70. Up similarly. Good.
+
+If multiple middle conflict impossible. If due false positive, more suppression.
+
+Now, H2 conflict AND false one true -15 tanh -1. Good.
+
+Potential issue: H2 top_conflict false when same_1 true below_1 false: z=10*1 +10*(-1)-15=-15 => -1. Good.
+
+Now, output left/right do not include conflict penalties. If middle conflict true and enemy_left/right both false, no-op. If enemy_left true, right action. But if enemy_left true due to enemy above/below, moving right may be safe. Good.
+
+Could horizontal action move into enemy in same row? If same row enemy, vertical raw true and no conflict (unless both above/below). Vertical weight higher, so vertical. If same row and conflict (above/below also), vertical suppressed, horizontal may move into same row enemy? If same row enemy and above/below, horizontal moves along same row, may be safe if enemy not in direction? But global horizontal may move toward enemy if enemy on opposite side? Example player row5, enemy same row left, enemy above/below. enemy_left true => h2_right true, move right away from same enemy. Good. If enemy same row right, move left. If enemy same row but global enemy_left also true due to above enemy left, h2_right true, may move right toward same enemy right? Suppose same enemy right, above enemy left. enemy_left true, enemy_right true (same right). h2_left and h2_right both true. Tie. Could move left into above? no, horizontal. Might move left away from same right, safe. If same enemy left, above enemy right, h2_left true, move left into same? Actually same enemy left, moving left toward it. But enemy_right true from above, h2_left true. Could be bad. But conflict suppresses vertical, horizontal tie maybe. Rare. Could improve by using same row horizontal relative, but H1 budget. Not necessary.
+
+Could use trail channel to detect enemy behind? no.
+
+Now, need ensure final code not too long but okay.
+
+Let's consider if the environment's action 'f' fire might actually do something not shown? shot_timer exists but not used in act. Maybe fire intended to shoot? Source incomplete? It has self.shot_timer =0 but no use. So fire no effect. Avoid.
+
+Now, maybe the observation wrapper channel 4 trail could be used to detect enemy direction. We ignore.
+
+Could policy be considered "from scratch" yes.
+
+Need final answer code block. Should we include comments? Fine. But maybe they want only code. We'll output code block.
+
+Double-check no use of np. We don't need np. Good.
+
+Potential issue: The backend compile expects prog.h1_units length <= h1_dim. We add exactly 32. Let's count in code:
+for r in range(2,9): 7
+for r in range(1,8): 7
+for r in range(1,9): 8 =>22
+thresholds:
+player_top 1 (23)
+player_bottom 1 (24)
+enemy_left 1 (25)
+enemy_right 1 (26)
+enemy_top 1 (27)
+enemy_bottom 1 (28)
+gold_top 1 (29)
+gold_bottom 1 (30)
+gold_left 1 (31)
+gold_right 1 (32)
+Yes.
+
+H2 count:
+h2_down 1
+h2_up 2
+for r in range(2,8): 6 =>8
+top_conflict 9
+bottom_conflict 10
+h2_left 11
+h2_right 12
+h2_gold_up 13
+h2_gold_down 14
+h2_gold_left 15
+h2_gold_right 16
+<=32.
+
+Potential issue: H2 names "h2_down" and "h2_up" maybe conflict with output? no.
+
+Potential issue: In output down terms, we include **down_conflict_terms. down_conflict_terms has keys conflict_2..7, top_conflict. All H2 exist. Good.
+
+Potential issue: In output up terms, up_conflict_terms keys conflict_2..7, bottom_conflict. Good.
+
+Potential issue: set_output_action for action 2 (up) includes h2_up and h2_gold_up and conflict terms. If conflict terms negative large, bias -220. Good.
+
+Let's manually compute logits for a simple state to ensure no accidental huge positive from conflict false cancellation error.
+State: no enemies, no gold. H1 AND all false -1. Thresholds enemy/gold false -1, player_top/bottom maybe one true? Player at row5, player_top false, player_bottom false. H2 down_raw: 8 false => z=0, h=0. up_raw 14 false =>0. middle conflicts: each AND false (none) => -1. top/bottom conflict -1. h2_left enemy_right false =>0. h2_right 0. gold AND NOT: gold false, enemy false =>0. Output:
+no-op -5.
+left: -10 +25*0+10*0=-10.
+up: bias -220 + h2_up 0 + gold_up0 + conflict terms: 6 middle -30*-1=180, bottom -30*-1=30 total210 => -10.
+right -10.
+down: bias -220 + conflict 6*30 + top30=210 => -10.
+fire -20. Good.
+
+State: enemy above player row5 (row4). H1 above_5 true, below_5 false, same false. H2 down_raw true (above_5) => tanh2. up_raw false. conflict_5? above_5 true below_5 false => -1. top/bottom -1. enemy_top true (row4), enemy_left/right depending. Suppose enemy center, enemy_left/right false? If x=5, enemy_right true (cols5-9) maybe. h2_left true. Output down: bias -220 + conflicts 210 + down 33*0.964=31.8 =>21.8. up: -10. left: -10+25*0.964=14.1. no-op -5. Chooses down. Good.
+
+State: enemy below row6, player5. up 20.8, down -10, horizontal maybe. Chooses up.
+
+State: enemy same row5. H1 same_5 true. down_raw? above false, same_1 false =>0. up_raw includes same_5 => true. up 20.8. Chooses up. Good.
+
+State: enemy same row1. down_raw same_1 true =>21.8, up false. Chooses down. Good.
+
+State: enemy same row8. up_raw same_8 true =>20.8, down false. Chooses up. Good.
+
+State: enemy same row1 and below row2. H1 same_1 true, below_1 true. down_raw true, up_raw true. top_conflict true. down: bias -220 + conflicts: middle 6 false 180, top true -30 =>150, down 31.8 => -38.2. up: bias -220 + conflicts: middle 180, bottom false30 =>210, up 30.8 =>20.8. Chooses up (no-op). Good.
+
+State: enemy above row7 and same row8. bottom_conflict true. down: bias -220 + middle180 + top false30=210, down31.8=>21.8. up: bias -220 + middle180 + bottom true -30=150, up30.8=>-39.2. Chooses down (no-op). Good.
+
+State: enemy above row4 and below row6, player5. conflict_5 true. down: bias -220 + middle: conflict_5 true -30, other 5 false 150, top false30 =>150, down31.8=>-38.2. up: middle true -30 +5*30=150, bottom false30=>180? Wait up conflict terms: 6 middle + bottom. If conflict_5 true, other 5 middle false 150, bottom false30 =>180, bias -220 => -40, up raw true (below_5) 30.8 => -9.2. No-op -5, so no-op slightly higher. Good. If horizontal, wins. If no horizontal, no-op. Good.
+
+But up logit -9.2 > down -38, but no-op -5 > up. Good.
+
+What if conflict true and up_raw true with multiple terms tanh4=0.999, up -40+32=-8, no-op -5. Good.
+
+What if conflict true and gold_up true: up -8+9.6=1.6, no-op -5, chooses up! Wait conflict true, gold_up true. Up logit: base with conflict true -40? Let's recalc: up bias -220, conflict contribution 180 (one middle true, 5 false, bottom false) =180? 5*30=150 + bottom30=180, bias -220 => -40. up_raw true 32*0.964=30.8 => -9.2. gold_up true 9.64 => 0.44. No-op -5. So chooses up despite conflict. Is that bad? Conflict means enemy above and below. Gold_up true means gold top and no enemy_top. But if enemy above row4, enemy_top true, so gold_up false. If conflict at row5 with enemy above row4 (top) and below row6, enemy_top true, gold_up false. If conflict at row6 with enemy above row5 (not top) and below row7, enemy_top false, gold_top true could make gold_up true. Player row6, enemy above row5, below row7, gold top. Up would move to row5 into enemy above. Bad. Our conflict penalty not enough when gold adds 10. Need increase penalty or reduce gold. For conflict true, we want vertical logit < no-op even with gold. Currently up base -9.2, +10 =0.8. Need penalty P larger. We set P=30 per conflict (weight -30, bias -30 per unit). Conflict true reduces base from -10 to -40 (reduction 30). Raw up 30.8 => -9.2. Gold 10 =>0.8. Need reduction > raw+gold+5? We want conflict true logit < -5. Raw max 32, gold 10, base no conflict -10. Need conflict penalty at least 32+10+5+10? Let's derive. No conflict up logit = -10 + 32 +10 =32. Conflict true should < -5. Penalty reduction P_total should make -10 +32+10 - P < -5 => P >37. Our P=30. Increase P to 50. Then conflict true base -60, raw32+gold10 => -18. Good. No conflict base -10. Let's set conflict weight -50, bias per unit -50. For 7 units, bias = -10 -7*50 = -360. Conflict true contribution: 6 false? For down 7 units, one true: 6*50 -50 =250, bias -360 => -110, raw33+gold10 => -67. Good. No conflict: 7*50=350, bias -360 => -10. Great. Use P=50.
+
+But large bias -360, okay. H2 conflict false -1, true +1. Good.
+
+Set conflict_weight = -50.0. bias_down = -10 - 50*len(down_conflict_terms) = -360. bias_up = -360.
+
+Then conflict true with gold: up base -110? Wait up terms 7 units, one middle true: 6 false*50=300, true -50 =>250, bias -360 => -110. raw32+gold10 => -68. Good. No conflict raw+gold 32. Good.
+
+Horizontal in conflict: left logit 14, no-op -5, chooses horizontal. Good.
+
+If conflict true and no raw? impossible. Good.
+
+Now, if top_conflict true, down suppressed: down terms 7 units, top true: 6 false*50=300, true -50=250, bias -360 => -110, raw33+gold10 => -67. Up base no penalty (top not in up) with bottom false: 7 false*50=350, bias -360 => -10, raw32+gold? gold_up maybe? If top_conflict row1, enemy_top true (enemy row1/2), gold_up false. Up 22. Good.
+
+If bottom_conflict true, up suppressed, down safe.
+
+Now, if middle conflict true and gold vertical, suppressed. Good.
+
+Need adjust code: conflict_weight = -50.0; bias_down = -10.0 + conflict_weight * len(down_conflict_terms)? Since conflict_weight negative, false contribution = -conflict_weight? Let's compute formula: weight = -P. False contribution per unit = P. Bias = -10 - P*n. If P=50, bias=-10-50n. We can set P=50.0; conflict_weight=-P; bias = -10.0 - P*len(terms). Good.
+
+Code:
+conflict_penalty = 50.0
+middle_conflict_terms = {f"conflict_{r}": -conflict_penalty for r in range(2,8)}
+down_conflict_terms = dict(middle_conflict_terms); down_conflict_terms["top_conflict"] = -conflict_penalty
+up_conflict_terms = dict(middle_conflict_terms); up_conflict_terms["bottom_conflict"] = -conflict_penalty
+bias_down = -10.0 - conflict_penalty * len(down_conflict_terms)
+bias_up = -10.0 - conflict_penalty * len(up_conflict_terms)
+
+Good.
+
+Now, H2 conflict AND weight 10 bias -15. True +1, false -1. Good.
+
+Could H2 conflict true value 0.9999999959, false -0.9999999959. Cancellation fine.
+
+Now, no-op bias -5. If conflict true and horizontal false, vertical suppressed below -5. Good.
+
+What if conflict true and horizontal true but horizontal logit 14, chooses horizontal. If horizontal action moves into same row enemy? As discussed rare. Could also penalize horizontal if conflict and same? Not needed.
+
+Now, gold seeking when no conflict: gold action logit -0.36, no-op -5. Good. If gold action also survival raw false but conflict false. Good.
+
+What if gold action true but survival raw true opposite: survival logit 22, gold opposite -0.36, survival wins. Good.
+
+Now, maybe no-op bias -5 makes gold action less likely if gold logit -0.36, still. If H2 gold true tanh(2)=0.964. If we want stronger, set gold weight 12 => -10+11.57=1.57. Could set 12. Survival weights 32/33. Gold 12. Conflict penalty 50. If conflict true and gold 12, still suppressed. Let's set gold weight 12.0 for better gold. Then no conflict gold logit 1.57. Good. Survival 22. Horizontal 14. No-op -5.
+
+If gold true and survival false, gold chosen. If gold true and horizontal true? e.g., gold_left and enemy_right? h2_left true 14, gold_left 12 => left 16. Good.
+
+Set gold_weight=12.0.
+
+Output:
+left: h2_left 25, h2_gold_left 12, bias -10.
+up: h2_up 32, h2_gold_up 12, conflicts, bias -360.
+right: 25,12.
+down:33,12.
+
+If no conditions, no-op -5. Good.
+
+Now, check conflict true with gold 12: up base -110 +32+12=-66. Good.
+
+Now, H2 gold AND NOT true z=2, tanh .964, weight12 =>11.57. Good.
+
+Could gold action be chosen when enemy in same half but not specific? h2_gold_up suppressed if enemy_top true. If enemy above row5 (not top) and gold top, h2_gold_up true, but specific above_6 true down survival wins. Good. If enemy above row5 and player row6, down logit 22, up gold 1.57, down. Good.
+
+If enemy below row7 and player row6, gold bottom, up survival? below_6 true up 22, down gold 1.57, up. Good.
+
+Now, maybe global enemy_top suppresses gold_up too much: if enemy top but far, gold top, no specific vertical threat, policy no-op instead of gold. Safe.
+
+Now, final code with comments maybe.
+
+Need ensure no line too long? Fine.
+
+Let's write final code cleanly.
+
+One more thought: The H1 AND gate for same_r uses group_a player row r, group_b enemy row r. If enemy row r is gold, false. Good. But if enemy row r and player row r, collision would have ended episode before observation? In env, act checks collision after player move and after entity move. If terminal, episode ends. Policy not called after terminal? Probably. If observation with enemy at player pos maybe terminal already. Not important.
+
+Could player row r and enemy row r-1 AND gate true if enemy row r-1 is gold? No, enemy channel. Good.
+
+Now, maybe channels: obs[:,:,1]=enemy, obs[:,:,2]=gold, obs[:,:,4]=trail. We use channel 2 for gold. Good.
+
+Now, final answer. Ensure code block only. Use triple backticks python.
+
+Double-check set_output_action default bias: We pass bias for all. Good.
+
+Potential issue: In compile, output_bias if None, b3 zeros. Then for each rule, b3[act_idx] = rule bias. We have rules for 0..5. Good.
+
+Potential issue: If h2_terms empty, compile loops none, bias set. Good.
+
+Potential issue: The program's output_rules order doesn't matter. If duplicate action_idx, b3 overwritten and W3 added. We have unique.
+
+Potential issue: H2 unit "h2_down" name maybe used in output and also H1? H1 names above/same, no.
+
+Potential issue: Python f-strings in dict keys okay.
+
+Potential issue: rect_cells for player_top rows 1,2 includes row 1 and 2. Player can be row1/2. Good. player_bottom rows7,8. Unused.
+
+Could remove player_top/bottom to free H1? But need exactly 32? Not exactly, can be less. But we have 32. If we remove, H1 count 30, still okay. But code already. Unused H1 may have threshold true for player_top/bottom, but not referenced. No effect. Fine.
+
+Could unused H1 player_top true cause H2? No, not referenced. Good.
+
+Now, final.
+</think>
+
+```python
+def build_policy():
+    def cell(r, c, ch):
+        return (r * 10 + c) * 6 + ch
+
+    def row_cells(r, ch):
+        return [cell(r, c, ch) for c in range(10)]
+
+    def rect_cells(r0, r1, c0, c1, ch):
+        out = []
+        for r in range(r0, r1 + 1):
+            for c in range(c0, c1 + 1):
+                out.append(cell(r, c, ch))
+        return out
+
+    prog = MLPProgram(
+        input_dim=600,
+        h1_dim=32,
+        h2_dim=32,
+        output_dim=6,
+        activation="tanh",
+    )
+
+    # Layer 1: relative enemy-row detectors.
+    # above_r: player in row r, enemy in row r-1.
+    for r in range(2, 9):
+        prog.add_h1_and_gate(
+            f"above_{r}",
+            row_cells(r, 0),
+            row_cells(r - 1, 1),
+            gain=20.0,
+        )
+
+    # below_r: player in row r, enemy in row r+1.
+    for r in range(1, 8):
+        prog.add_h1_and_gate(
+            f"below_{r}",
+            row_cells(r, 0),
+            row_cells(r + 1, 1),
+            gain=20.0,
+        )
+
+    # same_r: player and enemy in row r.
+    for r in range(1, 9):
+        prog.add_h1_and_gate(
+            f"same_{r}",
+            row_cells(r, 0),
+            row_cells(r, 1),
+            gain=20.0,
+        )
+
+    # Layer 1: coarse global detectors.
+    prog.add_h1_threshold(
+        "player_top",
+        {i: 1.0 for i in rect_cells(1, 2, 0, 9, 0)},
+        threshold=0.5,
+        gain=20.0,
+    )
+    prog.add_h1_threshold(
+        "player_bottom",
+        {i: 1.0 for i in rect_cells(7, 8, 0, 9, 0)},
+        threshold=0.5,
+        gain=20.0,
+    )
+
+    prog.add_h1_threshold(
+        "enemy_left",
+        {i: 1.0 for i in rect_cells(1, 8, 0, 4, 1)},
+        threshold=0.5,
+        gain=20.0,
+    )
+    prog.add_h1_threshold(
+        "enemy_right",
+        {i: 1.0 for i in rect_cells(1, 8, 5, 9, 1)},
+        threshold=0.5,
+        gain=20.0,
+    )
+    prog.add_h1_threshold(
+        "enemy_top",
+        {i: 1.0 for i in rect_cells(1, 4, 0, 9, 1)},
+        threshold=0.5,
+        gain=20.0,
+    )
+    prog.add_h1_threshold(
+        "enemy_bottom",
+        {i: 1.0 for i in rect_cells(5, 8, 0, 9, 1)},
+        threshold=0.5,
+        gain=20.0,
+    )
+
+    prog.add_h1_threshold(
+        "gold_top",
+        {i: 1.0 for i in rect_cells(1, 4, 0, 9, 2)},
+        threshold=0.5,
+        gain=20.0,
+    )
+    prog.add_h1_threshold(
+        "gold_bottom",
+        {i: 1.0 for i in rect_cells(5, 8, 0, 9, 2)},
+        threshold=0.5,
+        gain=20.0,
+    )
+    prog.add_h1_threshold(
+        "gold_left",
+        {i: 1.0 for i in rect_cells(1, 8, 0, 4, 2)},
+        threshold=0.5,
+        gain=20.0,
+    )
+    prog.add_h1_threshold(
+        "gold_right",
+        {i: 1.0 for i in rect_cells(1, 8, 5, 9, 2)},
+        threshold=0.5,
+        gain=20.0,
+    )
+
+    # Layer 2: raw vertical action scores.
+    down_terms = {f"above_{r}": 1.0 for r in range(2, 9)}
+    down_terms["same_1"] = 1.0
+    prog.add_h2_gate("h2_down", down_terms, bias=float(len(down_terms)))
+
+    up_terms = {f"below_{r}": 1.0 for r in range(1, 8)}
+    for r in range(2, 9):
+        up_terms[f"same_{r}"] = 1.0
+    prog.add_h2_gate("h2_up", up_terms, bias=float(len(up_terms)))
+
+    # Layer 2: vertical conflict detectors.
+    # If enemies are both above and below, vertical movement is unsafe.
+    for r in range(2, 8):
+        prog.add_h2_gate(
+            f"conflict_{r}",
+            {f"above_{r}": 10.0, f"below_{r}": 10.0},
+            bias=-15.0,
+        )
+
+    # Top boundary conflict: row 1 with same-row and below-row enemies.
+    prog.add_h2_gate(
+        "top_conflict",
+        {"same_1": 10.0, "below_1": 10.0},
+        bias=-15.0,
+    )
+
+    # Bottom boundary conflict: row 8 with above-row and same-row enemies.
+    prog.add_h2_gate(
+        "bottom_conflict",
+        {"above_8": 10.0, "same_8": 10.0},
+        bias=-15.0,
+    )
+
+    # Layer 2: horizontal avoidance scores.
+    prog.add_h2_gate("h2_left", {"enemy_right": 1.0}, bias=1.0)
+    prog.add_h2_gate("h2_right", {"enemy_left": 1.0}, bias=1.0)
+
+    # Layer 2: gold-seeking scores, suppressed by enemies in the same half.
+    prog.add_h2_gate(
+        "h2_gold_up",
+        {"gold_top": 1.0, "enemy_top": -1.0},
+        bias=0.0,
+    )
+    prog.add_h2_gate(
+        "h2_gold_down",
+        {"gold_bottom": 1.0, "enemy_bottom": -1.0},
+        bias=0.0,
+    )
+    prog.add_h2_gate(
+        "h2_gold_left",
+        {"gold_left": 1.0, "enemy_left": -1.0},
+        bias=0.0,
+    )
+    prog.add_h2_gate(
+        "h2_gold_right",
+        {"gold_right": 1.0, "enemy_right": -1.0},
+        bias=0.0,
+    )
+
+    # Output scoring.
+    # Conflict units are approximately -1 when inactive and +1 when active.
+    # Negative output weights plus a compensating bias make inactive conflicts
+    # contribute zero and active conflicts strongly suppress vertical actions.
+    conflict_penalty = 50.0
+
+    middle_conflict_terms = {
+        f"conflict_{r}": -conflict_penalty for r in range(2, 8)
+    }
+
+    down_conflict_terms = dict(middle_conflict_terms)
+    down_conflict_terms["top_conflict"] = -conflict_penalty
+
+    up_conflict_terms = dict(middle_conflict_terms)
+    up_conflict_terms["bottom_conflict"] = -conflict_penalty
+
+    bias_down = -10.0 - conflict_penalty * len(down_conflict_terms)
+    bias_up = -10.0 - conflict_penalty * len(up_conflict_terms)
+
+    prog.set_output_action(0, {}, bias=-5.0)
+    prog.set_output_action(
+        1,
+        {"h2_left": 25.0, "h2_gold_left": 12.0},
+        bias=-10.0,
+    )
+    prog.set_output_action(
+        2,
+        {
+            "h2_up": 32.0,
+            "h2_gold_up": 12.0,
+            **up_conflict_terms,
+        },
+        bias=bias_up,
+    )
+    prog.set_output_action(
+        3,
+        {"h2_right": 25.0, "h2_gold_right": 12.0},
+        bias=-10.0,
+    )
+    prog.set_output_action(
+        4,
+        {
+            "h2_down": 33.0,
+            "h2_gold_down": 12.0,
+            **down_conflict_terms,
+        },
+        bias=bias_down,
+    )
+    prog.set_output_action(5, {}, bias=-20.0)
+
+    return MLPCompilerBackend.compile(prog)
+```
