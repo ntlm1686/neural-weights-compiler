@@ -15,6 +15,19 @@ from neural_compiler import ExecutableMLP
 from stage1_mlp_benchmark import evaluate_game
 
 
+class CallableAdapter:
+    """Adapt a submitted callable policy to the benchmark's forward interface."""
+    def __init__(self, model):
+        self.model = model
+
+    def forward(self, x):
+        return self.model(x)
+
+    @property
+    def nonzero_params(self):
+        return sum(np.count_nonzero(x) for x in self.model.weights + self.model.biases)
+
+
 def load_edits(path):
     text = path.read_text(encoding="utf-8")
     blocks = re.findall(r"```edits\s*\n(.*?)```", text, re.S)
@@ -52,10 +65,17 @@ def main():
     if args.policy.suffix in (".txt", ".md"):
         model = load_edits(args.policy)
     else:
+        # Some generated programs use the short names from the supplied source snippets.
+        import neural_compiler.ir as ir
+        import neural_compiler.mlp_backend as backend
+        sys.modules.setdefault("ir", ir)
+        sys.modules.setdefault("backend", backend)
         spec = importlib.util.spec_from_file_location("submitted_policy", args.policy)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         model = module.build_policy()
+        if not hasattr(model, "forward") and callable(model):
+            model = CallableAdapter(model)
     env_cls, obs_fn = {"breakout": (BreakoutEnv, breakout_obs),
                        "seaquest": (SeaquestEnv, seaquest_obs),
                        "asterix": (AsterixEnv, asterix_obs)}[args.game]

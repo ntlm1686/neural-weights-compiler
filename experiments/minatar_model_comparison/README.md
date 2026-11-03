@@ -32,3 +32,16 @@ python experiments/minatar_model_comparison/evaluate.py experiments/minatar_mode
 python experiments/minatar_model_comparison/evaluate.py experiments/minatar_model_comparison/terra_compiler_seaquest.py --game seaquest
 python experiments/minatar_model_comparison/evaluate.py results/exp5_subagent_response.md --game breakout
 ```
+
+## Local Qwen3.8-27B
+
+The model was restored from the user's existing HDFS archive; all 18 shards were checked against the archived SHA-256 manifest. Snapshot revision: `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0`. Local inference used vLLM 0.31.0, BF16 on one H100 80 GB, text-only mode, temperature 0, `enable_thinking=False`, and 4,096 maximum output tokens. Each of the six task/condition prompts was sent in its own independent conversation in one batch, with no gameplay feedback. The Breakout standalone prompt asks for literal edits; for the other tasks standalone prompts ask for Python weight initialization. The Seaquest standalone response chose seeded random initial weights, so it does not meet the original Astra text-only weight-writing protocol.
+
+| Condition | Breakout | Seaquest | Asterix |
+| --- | ---: | ---: | ---: |
+| Alone | 0.23 ± 0.03 | 0.01 ± 0.01 | Truncated at 4,096 tokens |
+| NeuralCompiler | Compile error | 0.10 ± 0.03 | 0.34 ± 0.05 |
+
+The Breakout compiler response references H1 unit `paddle_col_1` as an H2 output signal and fails with `KeyError`; it was not repaired or scored. The Asterix standalone response did not close its Python block or define a complete return before the token limit. Original model outputs are stored as `qwen38_*.txt`; complete Python blocks were extracted verbatim into `.py` files for evaluation. The evaluator makes the source snippets' short `ir` and `backend` import names available as aliases, and adapts the standalone Seaquest response's callable to the standard `forward` interface without changing its weights or behavior.
+
+The model files live under `.local_models/qwen38-27b` and are ignored by Git. `scripts/restore_qwen38_for_eval.py` restores the locally referenced archive, and `scripts/run_qwen38_minatar.py` generates the raw outputs when run with a suitable vLLM environment and GPU. The weights occupy about 52 GiB; they are not included in the repository.

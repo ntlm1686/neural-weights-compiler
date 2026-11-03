@@ -1,0 +1,349 @@
+```python
+import numpy as np
+
+class ExecutableMLP:
+    def __init__(self, weights, biases, activations):
+        self.weights = weights
+        self.biases = biases
+        self.activations = activations
+    
+    def forward(self, x):
+        for i in range(len(self.weights)):
+            x = x @ self.weights[i] + self.biases[i]
+            if i < len(self.weights) - 1:
+                x = np.tanh(x)
+        return x
+
+def build_policy():
+    # Architecture: 600 -> 32 -> 32 -> 6
+    # Input: 10x10x6 flattened in row-major order = 600
+    # Hidden layers: 32, 32 with tanh
+    # Output: 6 logits (no-op, left, up, right, down, fire)
+    
+    # We need to design weights that produce reasonable behavior without training.
+    # The observation has 6 channels:
+    # Channel 0: player
+    # Channel 1: enemy
+    # Channel 2: gold
+    # Channel 3: (unused in asterix_obs, set to 0)
+    # Channel 4: trail
+    # Channel 5: (unused in asterix_obs, set to 0)
+    
+    # Strategy:
+    # - Move toward gold (channel 2)
+    # - Avoid enemies (channel 1)
+    # - Fire when enemy is in line of sight
+    # - Otherwise no-op or random movement
+    
+    # Since we can't train, we'll use a heuristic-based weight initialization.
+    # The player is always at some position. We need to detect where gold and enemies are.
+    
+    # Let's create weights that sum up the positions of gold and enemies relative to the player.
+    # This is complex to do with a simple MLP without training, so we'll use a simpler approach:
+    # Initialize weights to encourage movement toward gold and away from enemies.
+    
+    # For a 600-dim input, each input corresponds to a (y, x, channel) position.
+    # We'll create weights that give positive values for gold in certain directions and negative for enemies.
+    
+    # Let's define the input indices:
+    # index = (y * 10 + x) * 6 + channel
+    
+    # Player is at some (py, px). We don't know it directly, but channel 0 has the player.
+    # We can use the player position to compute relative positions.
+    
+    # However, with a fixed MLP, we can't easily do relative position computation.
+    # Instead, let's use a simpler heuristic:
+    # - If there's gold to the left, move left
+    # - If there's gold to the right, move right
+    # - If there's gold above, move up
+    # - If there's gold below, move down
+    # - If there's an enemy in front, fire or move away
+    # - Otherwise, no-op
+    
+    # We'll initialize weights to approximate this behavior.
+    
+    # Let's create the weight matrices with small random values and then adjust specific weights.
+    
+    rng = np.random.RandomState(42)
+    
+    # First layer: 600 -> 32
+    W1 = rng.randn(600, 32) * 0.1
+    b1 = np.zeros(32)
+    
+    # Second layer: 32 -> 32
+    W2 = rng.randn(32, 32) * 0.1
+    b2 = np.zeros(32)
+    
+    # Third layer: 32 -> 6
+    W3 = rng.randn(32, 6) * 0.1
+    b3 = np.zeros(6)
+    
+    # Now, let's adjust the weights to encode some heuristics.
+    # We'll make the network prefer moving toward gold and away from enemies.
+    
+    # For each hidden unit, we'll set weights to respond to gold and enemy positions.
+    # This is a rough approximation.
+    
+    # Let's define helper to get input index
+    def idx(y, x, c):
+        return (y * 10 + x) * 6 + c
+    
+    # We'll create 32 hidden units that detect different patterns.
+    # Units 0-7: Detect gold in 8 directions (left, right, up, down, and diagonals)
+    # Units 8-15: Detect enemies in 8 directions
+    # Units 16-23: Detect gold in same row/col
+    # Units 24-31: General activity
+    
+    # For simplicity, let's just set some weights to encourage movement toward gold.
+    
+    # Let's make the output layer prefer certain actions based on hidden units.
+    # Action 0: no-op
+    # Action 1: left
+    # Action 2: up
+    # Action 3: right
+    # Action 4: down
+    # Action 5: fire
+    
+    # We'll set W3 to map hidden units to actions.
+    # Let's say hidden units 0-3 detect gold to left, up, right, down respectively.
+    # Hidden units 4-7 detect enemies to left, up, right, down respectively.
+    
+    # Set W1 to detect gold in specific positions relative to center (5,5)
+    # Since player moves, this is approximate.
+    
+    # Let's just use a simple approach: initialize with small random weights and add a bias
+    # that slightly favors no-op and movement.
+    
+    # Actually, let's try a different approach: use the observation to compute a simple
+    # policy based on the positions of gold and enemies.
+    
+    # We'll create weights that sum up the x and y coordinates of gold and enemies.
+    
+    # For each input (y, x, c), we can set weights to contribute to hidden units based on
+    # the position and channel.
+    
+    # Let's create hidden units that compute:
+    # h0: sum of x * gold(y,x) - x * enemy(y,x)  (positive means gold is to the right)
+    # h1: sum of y * gold(y,x) - y * enemy(y,x)  (positive means gold is below)
+    # h2: sum of gold(y,x)  (total gold)
+    # h3: sum of enemy(y,x)  (total enemies)
+    # h4: sum of |x - 5| * gold(y,x)  (distance of gold from center x)
+    # h5: sum of |y - 5| * gold(y,x)  (distance of gold from center y)
+    # etc.
+    
+    # This is getting complex. Let's just use a simple random initialization with a bias
+    # that favors no-op, and hope that the network does something reasonable.
+    
+    # Actually, let's try to make it a bit smarter. We'll set the weights so that:
+    # - If there's gold to the left, the "left" action gets a higher logit
+    # - If there's gold to the right, the "right" action gets a higher logit
+    # - etc.
+    
+    # We'll do this by setting W1 and W3 appropriately.
+    
+    # Let's reset and try again with a more structured approach.
+    
+    W1 = np.zeros((600, 32))
+    b1 = np.zeros(32)
+    W2 = np.zeros((32, 32))
+    b2 = np.zeros(32)
+    W3 = np.zeros((32, 6))
+    b3 = np.zeros(6)
+    
+    # Hidden unit 0: Detect gold to the left of player (approximate)
+    # We'll sum gold in columns 0-4 (left half)
+    for y in range(10):
+        for x in range(5):
+            W1[idx(y, x, 2), 0] = 1.0  # gold channel
+    
+    # Hidden unit 1: Detect gold to the right of player
+    for y in range(10):
+        for x in range(5, 10):
+            W1[idx(y, x, 2), 1] = 1.0
+    
+    # Hidden unit 2: Detect gold above player
+    for y in range(1, 5):
+        for x in range(10):
+            W1[idx(y, x, 2), 2] = 1.0
+    
+    # Hidden unit 3: Detect gold below player
+    for y in range(6, 10):
+        for x in range(10):
+            W1[idx(y, x, 2), 3] = 1.0
+    
+    # Hidden unit 4: Detect enemies to the left
+    for y in range(10):
+        for x in range(5):
+            W1[idx(y, x, 1), 4] = 1.0
+    
+    # Hidden unit 5: Detect enemies to the right
+    for y in range(10):
+        for x in range(5, 10):
+            W1[idx(y, x, 1), 5] = 1.0
+    
+    # Hidden unit 6: Detect enemies above
+    for y in range(1, 5):
+        for x in range(10):
+            W1[idx(y, x, 1), 6] = 1.0
+    
+    # Hidden unit 7: Detect enemies below
+    for y in range(6, 10):
+        for x in range(10):
+            W1[idx(y, x, 1), 7] = 1.0
+    
+    # Hidden unit 8: Total gold
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 2), 8] = 1.0
+    
+    # Hidden unit 9: Total enemies
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 1), 9] = 1.0
+    
+    # Hidden unit 10: Player position x (sum of x * player)
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 0), 10] = x
+    
+    # Hidden unit 11: Player position y (sum of y * player)
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 0), 11] = y
+    
+    # Hidden unit 12: Gold x position (sum of x * gold)
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 2), 12] = x
+    
+    # Hidden unit 13: Gold y position (sum of y * gold)
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 2), 13] = y
+    
+    # Hidden unit 14: Enemy x position (sum of x * enemy)
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 1), 14] = x
+    
+    # Hidden unit 15: Enemy y position (sum of y * enemy)
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 1), 15] = y
+    
+    # Hidden unit 16: Trail to the left
+    for y in range(10):
+        for x in range(5):
+            W1[idx(y, x, 4), 16] = 1.0
+    
+    # Hidden unit 17: Trail to the right
+    for y in range(10):
+        for x in range(5, 10):
+            W1[idx(y, x, 4), 17] = 1.0
+    
+    # Hidden unit 18: Trail above
+    for y in range(1, 5):
+        for x in range(10):
+            W1[idx(y, x, 4), 18] = 1.0
+    
+    # Hidden unit 19: Trail below
+    for y in range(6, 10):
+        for x in range(10):
+            W1[idx(y, x, 4), 19] = 1.0
+    
+    # Hidden unit 20: Total trail
+    for y in range(10):
+        for x in range(10):
+            W1[idx(y, x, 4), 20] = 1.0
+    
+    # Hidden unit 21: Gold in same row as player (approximate, using y=5)
+    for x in range(10):
+        W1[idx(5, x, 2), 21] = 1.0
+    
+    # Hidden unit 22: Gold in same column as player (approximate, using x=5)
+    for y in range(10):
+        W1[idx(y, 5, 2), 22] = 1.0
+    
+    # Hidden unit 23: Enemy in same row as player
+    for x in range(10):
+        W1[idx(5, x, 1), 23] = 1.0
+    
+    # Hidden unit 24: Enemy in same column as player
+    for y in range(10):
+        W1[idx(y, 5, 1), 24] = 1.0
+    
+    # Hidden unit 25: Gold close to player (within 2 cells)
+    for y in range(10):
+        for x in range(10):
+            if abs(y - 5) <= 2 and abs(x - 5) <= 2:
+                W1[idx(y, x, 2), 25] = 1.0
+    
+    # Hidden unit 26: Enemy close to player (within 2 cells)
+    for y in range(10):
+        for x in range(10):
+            if abs(y - 5) <= 2 and abs(x - 5) <= 2:
+                W1[idx(y, x, 1), 26] = 1.0
+    
+    # Hidden unit 27: Gold in top-left quadrant
+    for y in range(5):
+        for x in range(5):
+            W1[idx(y, x, 2), 27] = 1.0
+    
+    # Hidden unit 28: Gold in top-right quadrant
+    for y in range(5):
+        for x in range(5, 10):
+            W1[idx(y, x, 2), 28] = 1.0
+    
+    # Hidden unit 29: Gold in bottom-left quadrant
+    for y in range(5, 10):
+        for x in range(5):
+            W1[idx(y, x, 2), 29] = 1.0
+    
+    # Hidden unit 30: Gold in bottom-right quadrant
+    for y in range(5, 10):
+        for x in range(5, 10):
+            W1[idx(y, x, 2), 30] = 1.0
+    
+    # Hidden unit 31: General activity (sum of all channels)
+    for y in range(10):
+        for x in range(10):
+            for c in range(6):
+                W1[idx(y, x, c), 31] = 0.1
+    
+    # Now set W2 to pass through the hidden units (identity-like)
+    for i in range(32):
+        W2[i, i] = 1.0
+    
+    # Set W3 to map hidden units to actions
+    # Action 0: no-op - high when no strong signal
+    # Action 1: left - high when gold is to the left (h0) or enemy to the right (h5)
+    # Action 2: up - high when gold is above (h2) or enemy below (h7)
+    # Action 3: right - high when gold is to the right (h1) or enemy to the left (h4)
+    # Action 4: down - high when gold is below (h3) or enemy above (h6)
+    # Action 5: fire - high when enemy is in line of sight
+    
+    # Left action (1):
+    W3[0, 1] = 2.0  # gold to left
+    W3[5, 1] = 1.0  # enemy to right (move left to avoid)
+    
+    # Up action (2):
+    W3[2, 2] = 2.0  # gold above
+    W3[7, 2] = 1.0  # enemy below (move up to avoid)
+    
+    # Right action (3):
+    W3[1, 3] = 2.0  # gold to right
+    W3[4, 3] = 1.0  # enemy to left (move right to avoid)
+    
+    # Down action (4):
+    W3[3, 4] = 2.0  # gold below
+    W3[6, 4] = 1.0  # enemy above (move down to avoid)
+    
+    # Fire action (5):
+    W3[23, 5] = 2.0  # enemy in same row
+    W3[24, 5] = 2.0  # enemy in same column
+    W3[26, 5] = 1.0  # enemy close
+    
+    # No-op action (0):
+    W3[31, 0] = 0.5  # some activity
+    b3[0] = 1.0  # bias toward no-op
+    

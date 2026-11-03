@@ -1,0 +1,56 @@
+```python
+import numpy as np
+
+class ExecutableMLP:
+    def __init__(self, weights, biases):
+        self.weights = weights
+        self.biases = biases
+    
+    def __call__(self, x):
+        for i in range(len(self.weights)):
+            x = x @ self.weights[i] + self.biases[i]
+            if i < len(self.weights) - 1:
+                x = np.tanh(x)
+        return x
+
+def build_policy():
+    # Architecture: 600 -> 32 -> 32 -> 6
+    # Input: 10x10x6 flattened in row-major order = 600
+    # Hidden layers: 32, 32 with tanh
+    # Output: 6 actions (0=no-op, 1=left, 2=up, 3=right, 4=down, 5=fire)
+    
+    # Initialize weights with small random values
+    rng = np.random.RandomState(42)
+    
+    # Layer 1: 600 -> 32
+    W1 = rng.randn(600, 32) * 0.1
+    b1 = np.zeros(32)
+    
+    # Layer 2: 32 -> 32
+    W2 = rng.randn(32, 32) * 0.1
+    b2 = np.zeros(32)
+    
+    # Layer 3: 32 -> 6
+    W3 = rng.randn(32, 6) * 0.1
+    b3 = np.zeros(6)
+    
+    # Bias the policy towards sensible default behaviors:
+    # - Prefer moving up (action 2) to surface when oxygen is low
+    # - Prefer firing (action 5) when enemies are present
+    # - Prefer no-op (action 0) when safe
+    # 
+    # We'll set biases to encourage certain behaviors:
+    # b3[0] = 0.5  # no-op
+    # b3[1] = 0.0  # left
+    # b3[2] = 1.0  # up (strong preference to surface)
+    # b3[3] = 0.0  # right
+    # b3[4] = 0.0  # down
+    # b3[5] = 0.5  # fire
+    
+    b3 = np.array([0.5, 0.0, 1.0, 0.0, 0.0, 0.5])
+    
+    weights = [W1, W2, W3]
+    biases = [b1, b2, b3]
+    
+    return ExecutableMLP(weights, biases)
+```

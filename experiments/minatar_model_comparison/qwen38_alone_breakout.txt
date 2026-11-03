@@ -1,0 +1,175 @@
+## Design
+
+**Strategy:** The ball moves diagonally at 1 cell/step. The paddle is 1 cell wide. To survive, the paddle must be at the ball's x-coordinate when the ball reaches row 9. Since the ball's x changes by ±1 each step, the paddle must track the ball's x exactly. The optimal policy is:
+- If ball_x > paddle_x: move right
+- If ball_x < paddle_x: move left  
+- If ball_x == paddle_x: no-op (stay)
+
+This is a simple "chase the ball" policy. With sticky actions (10% repeat), it's still near-optimal since the ball moves at most 1 cell/step and the paddle can match that.
+
+**Hidden units:**
+- **Unit 0 (h1):** Detects ball position (sum of ball channel)
+- **Unit 1 (h1):** Detects paddle position (sum of paddle channel)
+- **Units 2-11 (h1):** Ball column detectors (one per column 0-9)
+- **Units 12-21 (h1):** Paddle column detectors (one per column 0-9)
+- **Units 22-31 (h1):** Unused (zero)
+
+**h2 units:**
+- **Unit 0:** ball_x - paddle_x (positive if ball is right of paddle)
+- **Unit 1:** paddle_x - ball_x (positive if ball is left of paddle)
+- **Units 2-31:** Unused
+
+**Output:**
+- Logit[1] (left) = large if ball_x < paddle_x
+- Logit[3] (right) = large if ball_x > paddle_x
+- Logit[0] (no-op) = large if ball_x == paddle_x
+- Others: very negative
+
+The key insight: I need to compute the *difference* between ball and paddle x-positions. I'll use the column detectors to encode positions as weighted sums, then subtract.
+
+```edits
+# W1: 600 x 32
+# Units 2-11: ball column detectors (columns 0-9)
+# For column c, ball channel is at input indices: row*60 + c*6 + 3 for rows 0-9
+# We want unit (2+c) to be 1 if ball is in column c
+
+# Ball column 0 detector (unit 2): sum of ball channel in column 0
+W1[3:600:60, 2] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+# Ball column 1 detector (unit 3)
+W1[9:600:60, 3] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+# Ball column 2 detector (unit 4)
+W1[15:600:60, 4] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+# Ball column 3 detector (unit 5)
+W1[21:600:60, 5] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+# Ball column 4 detector (unit 6)
+W1[27:600:60, 6] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+# Ball column 5 detector (unit 7)
+W1[33:600:60, 7] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+# Ball column 6 detector (unit 8)
+W1[39:600:60, 8] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+# Ball column 7 detector (unit 9)
+W1[45:600:60, 9] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+# Ball column 8 detector (unit 10)
+W1[51:600:60, 10] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+# Ball column 9 detector (unit 11)
+W1[57:600:60, 11] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+
+# Paddle column detectors (units 12-21): paddle is always on row 9
+# Paddle channel is channel 0, row 9
+# For column c, input index = 9*60 + c*6 + 0 = 540 + c*6
+W1[540, 12] = 1   # paddle col 0
+W1[546, 13] = 1   # paddle col 1
+W1[552, 14] = 1   # paddle col 2
+W1[558, 15] = 1   # paddle col 3
+W1[564, 16] = 1   # paddle col 4
+W1[570, 17] = 1   # paddle col 5
+W1[576, 18] = 1   # paddle col 6
+W1[582, 19] = 1   # paddle col 7
+W1[588, 20] = 1   # paddle col 8
+W1[594, 21] = 1   # paddle col 9
+
+# b1: all zeros (default)
+
+# W2: 32 x 32
+# h2 unit 0: ball_x - paddle_x
+# ball_x = sum(c * h1[2+c]) for c=0..9
+# paddle_x = sum(c * h1[12+c]) for c=0..9
+# So h2[0] = sum(c * h1[2+c]) - sum(c * h1[12+c])
+# W2[2+c, 0] = c for c=0..9 (ball contribution)
+# W2[12+c, 0] = -c for c=0..9 (paddle contribution)
+W2[2, 0] = 0
+W2[3, 0] = 1
+W2[4, 0] = 2
+W2[5, 0] = 3
+W2[6, 0] = 4
+W2[7, 0] = 5
+W2[8, 0] = 6
+W2[9, 0] = 7
+W2[10, 0] = 8
+W2[11, 0] = 9
+W2[12, 0] = 0
+W2[13, 0] = -1
+W2[14, 0] = -2
+W2[15, 0] = -3
+W2[16, 0] = -4
+W2[17, 0] = -5
+W2[18, 0] = -6
+W2[19, 0] = -7
+W2[20, 0] = -8
+W2[21, 0] = -9
+
+# h2 unit 1: paddle_x - ball_x = -h2[0]
+# W2[2+c, 1] = -c, W2[12+c, 1] = c
+W2[2, 1] = 0
+W2[3, 1] = -1
+W2[4, 1] = -2
+W2[5, 1] = -3
+W2[6, 1] = -4
+W2[7, 1] = -5
+W2[8, 1] = -6
+W2[9, 1] = -7
+W2[10, 1] = -8
+W2[11, 1] = -9
+W2[12, 1] = 0
+W2[13, 1] = 1
+W2[14, 1] = 2
+W2[15, 1] = 3
+W2[16, 1] = 4
+W2[17, 1] = 5
+W2[18, 1] = 6
+W2[19, 1] = 7
+W2[20, 1] = 8
+W2[21, 1] = 9
+
+# b2: all zeros
+
+# W3: 32 x 6
+# Output 0 (no-op): large when ball_x == paddle_x, i.e., h2[0] == 0
+# Output 1 (left): large when ball_x < paddle_x, i.e., h2[0] < 0, h2[1] > 0
+# Output 3 (right): large when ball_x > paddle_x, i.e., h2[0] > 0, h2[1] < 0
+# Outputs 2,4,5: very negative
+
+# For no-op (output 0): we want it high when h2[0] is near 0
+# Use a negative quadratic-like: -h2[0]^2 is hard with linear. 
+# Instead: make no-op moderate, and left/right strongly activated by sign.
+# Simpler: 
+# logit[0] = 2 - 0.5*|h2[0]| approximated by: 2 - 0.5*(h2[0] if h2[0]>0 else -h2[0])
+# But we can't do abs easily. Let's use:
+# logit[0] = 2 - 0.3*h2[0] - 0.3*h2[1]  (since h2[1] = -h2[0], this is 2 - 0.6*h2[0]... not symmetric)
+# Better: logit[0] = 2 - 0.3*(h2[0] + h2[1]) = 2 - 0.3*0 = 2 always? No, h2[0]+h2[1]=0.
+# So logit[0] = 2 (constant) works as baseline.
+
+# logit[1] (left) = 3 * h2[1]  (positive when paddle_x > ball_x)
+# logit[3] (right) = 3 * h2[0]  (positive when ball_x > paddle_x)
+# logit[0] (no-op) = 2
+# logit[2], logit[4], logit[5] = -10
+
+W3[0, 0] = 0    # no-op doesn't depend on h2[0] directly for now
+W3[1, 0] = 0
+W3[0, 1] = 0
+W3[1, 1] = 0
+
+# Set W3 for output 0 (no-op): constant 2
+W3[:, 0] = 0
+b3[0] = 2
+
+# Output 1 (left): 3 * h2[1]
+W3[1, 1] = 3
+b3[1] = 0
+
+# Output 2 (up): -10
+W3[:, 2] = 0
+b3[2] = -10
+
+# Output 3 (right): 3 * h2[0]
+W3[0, 3] = 3
+b3[3] = 0
+
+# Output 4 (down): -10
+W3[:, 4] = 0
+b3[4] = -10
+
+# Output 5 (fire): -10
+W3[:, 5] = 0
+b3[5] = -10
+```
