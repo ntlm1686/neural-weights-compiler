@@ -2,6 +2,27 @@
 
 This repository explores constructing neural-network weights from hand-written circuit specifications. It contains a small MLP and Transformer intermediate representation (IR), NumPy weight backends, hand-constructed Go and MinAtar policies, and controlled circuit-grafting experiments. It was inspired by [Sparks of Weight-Space Programming](https://rikiyat.github.io/blog/weight-space-programming/) and related program-to-Transformer work such as [Tracr](https://arxiv.org/abs/2301.05062).
 
+## Results at a glance
+
+| Experiment | Local result | Evaluation |
+| --- | --- | --- |
+| **9×9 Go, 1.48M-parameter policy** | **82.0%** against the local `budget_0` checkpoint; **63.5%, 66.5%, 79.5%** against three local `ppo_s*` checkpoints (mean **69.8%**) | 200 games per opponent, 100 as each color; external checkpoints and local Go environment |
+| **MinAtar, 20,486-parameter policies** | **546.81 ± 15.29** Breakout; **59.80 ± 3.49** Seaquest; **64.85 ± 2.17** Asterix | 200 episodes per game; ± is the episode standard error |
+| **Transformer circuit compilation** | **500/500** on each of eight bounded tasks at each of three widths | Sorting includes duplicate integers; shortest path uses a separate 20-layer circuit and independent reference |
+| **Adding an 8-digit adder to a synthetic host** | **0/500 → 500/500** addition; host task **500/500 → 500/500**, with zero measured output drift | Separately constructed sparse host with reserved registers; 100/100 carry-chain stress cases |
+
+These are measured results, not claims that all inputs or implementations are equivalent. Go checkpoint identities and equivalence of the local game environments to the original evaluation harness have not been independently verified. The adder experiment does not use a pretrained LLM. Details and complete settings are in [the revalidation record](results/revalidation_2026-11-03.md).
+
+### MinAtar: local results and published baselines
+
+| Game | PPO 100M steps¹ | PPO 500M steps¹ | GPT-6 Astra one-shot¹ | This repository² |
+| --- | ---: | ---: | ---: | ---: |
+| Breakout | 15.8 | 25.3 | 517.4 | **546.81 ± 15.29** |
+| Seaquest | 5.6 | **88.9** | 53.1 | 59.80 ± 3.49 |
+| Asterix | 25.8 | 55.2 | 53.2 | **64.85 ± 2.17** |
+
+¹ Results reported in the [original article](https://rikiyat.github.io/blog/weight-space-programming/), which used 1,000 evaluation episodes. ² Our 200-episode results use the local implementation and one seed. These numbers are useful context, but do not establish a controlled head-to-head comparison: environment equivalence and the local policy's development history remain unverified.
+
 **Scope:** This is a research prototype, not a general natural-language-to-weights compiler. The repository does not include an automated LLM frontend. The Transformer backend operates on explicitly populated residual-stream registers, with attention, ReLU MLPs and residual connections, but no LayerNorm, token embedding or language-model output head. Its circuits require suitable register capacity, layers, heads, numerical ranges and input encodings. The experiments do not demonstrate grafting into a pretrained language model or solve the Gemma experiment from the original post.
 
 Weight construction does not use gradient descent. Evaluation does use forward passes and, for game experiments, environment rollouts. A construction-time zero-forward-pass budget cannot be inferred from evaluation results alone: this repository does not preserve a complete development or model-selection history.
@@ -44,6 +65,17 @@ python stage1_5_go_compiler.py --checkpoints /tmp/go_checkpoints --games 200 --s
 ## Transformer circuits
 
 The 2026-11-03 rerun evaluated eight bounded tasks with 500 deterministic-seed random examples each at three widths. Seven tasks used `(d, layers, heads)` of `(64, 6, 4)`, `(128, 8, 8)` and `(256, 8, 8)`. The shortest-path circuit uses **20 layers at each width**, respectively 0.99M, 3.96M and 15.77M parameters. Every task obtained 500/500 on its generated test set; the machine-readable data are in [results/transformer_revalidation.json](results/transformer_revalidation.json).
+
+| Task | Small | Medium | Large | Nonzero weights |
+| --- | ---: | ---: | ---: | ---: |
+| Comparison | 500/500 | 500/500 | 500/500 | 7 |
+| Maximum and argmax | 500/500 | 500/500 | 500/500 | 6 |
+| Counting matches | 500/500 | 500/500 | 500/500 | 13 |
+| Prefix sum | 500/500 | 500/500 | 500/500 | 66 |
+| Sorting, including duplicates | 500/500 | 500/500 | 500/500 | 337 |
+| Graph reachability | 500/500 | 500/500 | 500/500 | 80 |
+| Shortest path, **20 layers** | 500/500 | 500/500 | 500/500 | 160 |
+| Count above prefix mean | 500/500 | 500/500 | 500/500 | 11 |
 
 ![Accuracy on bounded Transformer tasks](assets/transformer_revalidation.png)
 
